@@ -523,10 +523,129 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     return Image.fromarray(cropped)
 
 
-def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1):
+def _deskew_photo(pil_img: Image.Image) -> Image.Image:
+    """检测并矫正照片的倾斜角度。
+
+    使用边缘检测和最小外接矩形来检测倾斜角度，
+    然后旋转矫正。
+
+    返回矫正后的照片。
+    """
+    arr = np.array(pil_img)
+    h, w = arr.shape[:2]
+    if h < 100 or w < 100:
+        return pil_img
+
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+
+    # 创建非白色区域掩码（照片内容）
+    _, binary = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY_INV)
+
+    # 查找轮廓
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # 找最大的非白区域（照片主体）
+    largest_cnt = None
+    largest_area = 0
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > largest_area and area > 5000:
+            largest_area = area
+            largest_cnt = cnt
+
+    if largest_cnt is None or largest_area < 10000:
+        return pil_img
+
+    # 计算最小外接旋转矩形
+    rect = cv2.minAreaRect(largest_cnt)
+    (cx, cy), (rot_bw, rot_bh), angle = rect
+
+    # 判断是否需要旋转
+    # 如果角度接近 ±90°，说明照片本身可能是横版/竖版，不需要旋转
+    # 只有轻微倾斜（3-45°）时才需要旋转矫正
+    if abs(angle) > 45:
+        # 角度大，可能是横竖版问题，跳过
+        return pil_img
+    elif abs(angle) < 3:
+        # 角度太小，不需要旋转
+        return pil_img
+    else:
+        # 执行旋转矫正
+        center = (cx, cy)
+        rot_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # 计算旋转后的边界
+        cos = np.abs(rot_matrix[0, 0])
+        sin = np.abs(rot_matrix[0, 1])
+        new_w = int(w * cos + h * sin)
+        new_h = int(w * sin + h * cos)
+
+        # 调整旋转矩阵以包含整个图像
+        rot_matrix[0, 2] += (new_w - w) / 2
+        rot_matrix[1, 2] += (new_h - h) / 2
+
+        # 执行旋转
+        rotated = cv2.warpAffine(arr, rot_matrix, (new_w, new_h),
+                                flags=cv2.INTER_CUBIC,
+                                borderMode=cv2.BORDER_REPLICATE)
+
+        return Image.fromarray(rotated)
+
+
+def _enhance_image(pil_img: Image.Image, strength: float = 1.0) -> Image.Image:
+    """增强照片画质。
+
+    应用以下增强效果：
+    1. 对比度增强（CLAHE）
+    2. 锐化
+    3. 去噪（可选）
+
+    参数：
+        pil_img: 输入图片
+        strength: 增强强度（0.0-1.0），默认 1.0
+
+    返回增强后的照片。
+    """
+    arr = np.array(pil_img)
+    h, w = arr.shape[:2]
+
+    # 转换为 BGR（OpenCV 格式）
+    bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+    # ── 1. 对比度增强（CLAHE）──
+    # 转换到 LAB 色彩空间
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l, a, b_ch = cv2.split(lab)
+
+    # 应用 CLAHE（限制对比度自适应直方图均衡化）
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+
+    # 合并通道并转回 BGR
+    lab = cv2.merge([l, a, b_ch])
+    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    # ── 2. 锐化 ──
+    # 使用 unsharp mask 技术
+    blur = cv2.GaussianBlur(enhanced, (0, 0), 3)
+    sharpened = cv2.addWeighted(enhanced, 1.5, blur, -0.5, 0)
+
+    # ── 3. 轻微去噪（可选）──
+    # 使用双边滤波保持边缘的同时去噪
+    denoised = cv2.bilateralFilter(sharpened, d=5, sigmaColor=50, sigmaSpace=50)
+
+    # 根据 strength 混合原始图像和增强图像
+    result = cv2.addWeighted(denoised, strength, arr, 1 - strength, 0)
+
+    # 转回 RGB
+    return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+
+
+def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1, enhance: bool = True):
     """将检测到的边界框裁剪并保存到输出目录。
     使用 PIL 保存以支持中文路径，并自动修正倒置照片和旋转角度。
     start_index: 起始编号（用于批量顺序编号）
+    enhance: 是否启用画质增强
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     saved = []
@@ -541,6 +660,13 @@ def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, sta
         pil_img = _fix_orientation(pil_img)
         # 检测白边分布并修正倾斜
         pil_img = _check_white_border_rotation(pil_img)
+        # 裁剪白边
+        pil_img = _crop_white_borders(pil_img)
+        # 倾斜矫正
+        pil_img = _deskew_photo(pil_img)
+        # 画质增强（可选）
+        if enhance:
+            pil_img = _enhance_image(pil_img)
         out_path = output_dir / f"{suffix}_{i:03d}.jpg"
         pil_img.save(str(out_path), "JPEG", quality=95)
         saved.append(out_path)
