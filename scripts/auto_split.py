@@ -317,10 +317,11 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     """综合多特征判断照片是否倒置并修正。
 
     融合以下特征（按置信度加权）：
-    1. 亮度/饱和度差值分析（权重 35%）- 最可靠
-    2. 四角白边分布分析（权重 25%）
-    3. 文字结构方向检测（权重 20%）
-    4. 垂直边缘密度分析（权重 20%）
+    1. 人脸位置分析（权重 40%）- 最可靠
+    2. 亮度/饱和度差值分析（权重 25%）
+    3. 四角白边分布分析（权重 20%）
+    4. 文字结构方向检测（权重 10%）
+    5. 垂直边缘密度分析（权重 5%）
 
     返回修正后的照片。
     """
@@ -332,7 +333,49 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
     # ═══════════════════════════════════════════
-    # 特征1：亮度/饱和度差值分析（最高权重 35%）
+    # 特征1：人脸位置分析（最高权重 40%）
+    # ═══════════════════════════════════════════
+    face_score = 0.0
+    faces = None
+    try:
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30))
+
+        if faces is not None and len(faces) >= 2:  # 至少2个人脸才可靠
+            # 统计人脸在上下半部分的分布
+            top_faces = sum(1 for x, y, fw, fh in faces if y + fh < h // 2)
+            bot_faces = len(faces) - top_faces
+            total_faces = len(faces)
+
+            # 计算人脸中心位置的分布
+            face_centers_y = [(y + fh/2) / h for x, y, fw, fh in faces]
+            avg_center = np.mean(face_centers_y)
+
+            # 决策逻辑：
+            # 人脸集中在底部（>60%在底部）→ 明显倒置
+            # 人脸集中在顶部（>60%在顶部）→ 正常
+            # 分布均匀 → 无法判断
+            if bot_faces / total_faces > 0.6:
+                face_score = 0.8  # 高置信度倒置
+            elif top_faces / total_faces > 0.6:
+                face_score = 0.1  # 正常
+            elif abs(avg_center - 0.5) < 0.1:
+                face_score = 0.3  # 分布均匀，不确定
+            else:
+                face_score = 0.5  # 中等置信度
+        elif faces is not None and len(faces) == 1:
+            # 单个人脸，检查位置
+            x, y, fw, fh = faces[0]
+            face_center_y = (y + fh/2) / h
+            if face_center_y > 0.6:
+                face_score = 0.6  # 人脸在底部，可能倒置
+            elif face_center_y < 0.4:
+                face_score = 0.2  # 人脸在顶部，正常
+    except:
+        pass  # 人脸检测失败不影响其他判断
+
+    # ═══════════════════════════════════════════
+    # 特征2：亮度/饱和度差值分析（权重 25%）
     # ═══════════════════════════════════════════
     top_bright = np.mean(gray[:h // 2])
     bot_bright = np.mean(gray[h // 2:])
@@ -347,10 +390,10 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     # 亮度差和饱和度差都大 → 高置信度
     score_brightness = min(abs(bright_diff) / 80.0, 1.0)
     score_saturation = min(abs(sat_diff) / 50.0, 1.0)
-    feature1_score = (score_brightness + score_saturation) / 2 * 0.35
+    feature2_score = (score_brightness + score_saturation) / 2 * 0.25
 
     # ═══════════════════════════════════════════
-    # 特征2：四角白边分布分析（权重 25%）
+    # 特征3：四角白边分布分析（权重 20%）
     # ═══════════════════════════════════════════
     corner_size = min(150, w // 5, h // 5)
     tl = np.mean(gray[:corner_size, :corner_size] > 230)
@@ -364,14 +407,14 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
 
     # 对角线差异大且单侧差异小 → 明显倒置
     if diag_diff > 0.5 and side_diff < 0.3:
-        feature2_score = 0.8 * 0.25
+        feature3_score = 0.8 * 0.20
     elif diag_diff > 0.3:
-        feature2_score = 0.4 * 0.25
+        feature3_score = 0.4 * 0.20
     else:
-        feature2_score = 0.0
+        feature3_score = 0.0
 
     # ═══════════════════════════════════════════
-    # 特征3：文字结构方向检测（权重 20%）
+    # 特征4：文字结构方向检测（权重 10%）
     # ═══════════════════════════════════════════
     _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
     kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 2))
@@ -392,14 +435,14 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
 
     # 文字集中在顶部 → 可能倒置
     if top_lines > bot_lines + 1:
-        feature3_score = 0.6 * 0.20
+        feature4_score = 0.6 * 0.10
     elif abs(top_lines - bot_lines) <= 1:
-        feature3_score = 0.0  # 分布均匀，无法判断
+        feature4_score = 0.0  # 分布均匀，无法判断
     else:
-        feature3_score = 0.3 * 0.20  # 轻微倾向
+        feature4_score = 0.3 * 0.10  # 轻微倾向
 
     # ═══════════════════════════════════════════
-    # 特征4：垂直边缘密度分析（权重 20%）
+    # 特征5：垂直边缘密度分析（权重 5%）
     # ═══════════════════════════════════════════
     sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
     sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
@@ -409,27 +452,37 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     bot_edges = np.mean(magnitude[h // 2:])
     edge_diff = abs(top_edges - bot_edges)
 
-    feature4_score = min(edge_diff / 100.0, 1.0) * 0.20
+    feature5_score = min(edge_diff / 100.0, 1.0) * 0.05
 
     # ═══════════════════════════════════════════
     # 综合评分与决策
     # ═══════════════════════════════════════════
-    total_score = (feature1_score + feature2_score +
-                   feature3_score + feature4_score)
+    total_score = (face_score * 0.40 +
+                   feature2_score +
+                   feature3_score +
+                   feature4_score +
+                   feature5_score)
 
     # 决策逻辑：
-    # 1. 如果亮度差特别大（>50），直接旋转
+    # 1. 如果人脸检测高置信度（>0.6），优先按人脸判断
     # 2. 否则按综合评分判断
 
-    if abs(bright_diff) > 50:
-        # 高置信度：直接旋转
+    if face_score >= 0.6:
+        # 人脸检测高置信度，直接旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.5:
+    elif face_score <= 0.2 and faces is not None and len(faces) >= 2:
+        # 人脸检测低置信度（正常），不旋转
+        pass
+    elif abs(bright_diff) > 50:
+        # 亮度差特别大，直接旋转
+        rotated = cv2.rotate(arr, cv2.ROTATE_180)
+        return _crop_white_borders(Image.fromarray(rotated))
+    elif total_score > 0.45:
         # 综合评分高，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.35 and diag_diff > 0.3:
+    elif total_score > 0.3 and diag_diff > 0.3:
         # 中等置信度 + 白边差异，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
