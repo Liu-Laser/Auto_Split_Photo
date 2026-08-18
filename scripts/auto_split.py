@@ -592,53 +592,24 @@ def _deskew_photo(pil_img: Image.Image) -> Image.Image:
         return Image.fromarray(rotated)
 
 
-def _enhance_image(pil_img: Image.Image, strength: float = 1.0) -> Image.Image:
-    """增强照片画质。
-
-    应用以下增强效果：
-    1. 对比度增强（CLAHE）
-    2. 锐化
-    3. 去噪（可选）
+def _enhance_image(pil_img: Image.Image, strength: float = 0.3) -> Image.Image:
+    """轻微调整对比度（仅微调，保持原始效果）。
 
     参数：
         pil_img: 输入图片
-        strength: 增强强度（0.0-1.0），默认 1.0
+        strength: 增强强度（0.0-1.0），默认 0.3（轻度）
 
-    返回增强后的照片。
+    返回微调后的照片。
     """
     arr = np.array(pil_img)
-    h, w = arr.shape[:2]
 
-    # 转换为 BGR（OpenCV 格式）
-    bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    # 仅使用简单的 gamma 校正微调对比度
+    gamma = 1.0 + (1.0 - strength) * 0.3  # strength=0.3 时 gamma≈1.21
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+    result = cv2.LUT(arr, table)
 
-    # ── 1. 对比度增强（CLAHE）──
-    # 转换到 LAB 色彩空间
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    l, a, b_ch = cv2.split(lab)
-
-    # 应用 CLAHE（限制对比度自适应直方图均衡化）
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-
-    # 合并通道并转回 BGR
-    lab = cv2.merge([l, a, b_ch])
-    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-    # ── 2. 锐化 ──
-    # 使用 unsharp mask 技术
-    blur = cv2.GaussianBlur(enhanced, (0, 0), 3)
-    sharpened = cv2.addWeighted(enhanced, 1.5, blur, -0.5, 0)
-
-    # ── 3. 轻微去噪（可选）──
-    # 使用双边滤波保持边缘的同时去噪
-    denoised = cv2.bilateralFilter(sharpened, d=5, sigmaColor=50, sigmaSpace=50)
-
-    # 根据 strength 混合原始图像和增强图像
-    result = cv2.addWeighted(denoised, strength, arr, 1 - strength, 0)
-
-    # 转回 RGB
-    return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+    return Image.fromarray(result)
 
 
 def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1, enhance: bool = True):
