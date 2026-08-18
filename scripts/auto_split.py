@@ -111,6 +111,9 @@ def _correct_rotation(pil_img: Image.Image, adjust_angle: bool = True) -> Image.
     """检测并矫正照片的旋转角度，并裁剪白边。
     适用于照片在扫描纸上放置倾斜的情况。
     adjust_angle: True=自动矫正，False=仅返回角度信息
+
+    重要：避免将横版照片错误旋转为竖版（或反之）。
+    判断逻辑：只有当旋转后宽高比更接近1:1时才进行旋转。
     """
     arr = np.array(pil_img)
     h, w = arr.shape[:2]
@@ -139,36 +142,63 @@ def _correct_rotation(pil_img: Image.Image, adjust_angle: bool = True) -> Image.
 
     # 计算最小外接旋转矩形
     rect = cv2.minAreaRect(largest_cnt)
-    (cx, cy), (bw, bh), angle = rect
+    (cx, cy), (rot_bw, rot_bh), angle = rect
 
-    # 标准化角度到 [-45, 45] 范围
-    original_angle = angle
-    if angle < -45:
-        angle += 90
-        bw, bh = bh, bw  # 交换宽高
+    # 计算原始宽高比
+    original_aspect = w / max(h, 1)
+
+    # 判断是否需要旋转：
+    # 核心逻辑：
+    # 1. 如果 angle ≈ ±90°，说明 minAreaRect 返回的是旋转后的尺寸
+    #    - 如果 original_aspect ≈ 1/rect_aspect，说明方向已正确，不需要旋转
+    #    - 否则需要旋转
+    # 2. 如果 angle 是轻微倾斜（3-45°），需要旋转矫正
+    needs_rotation = False
+    rotation_angle = 0
+
+    if abs(angle) > 45:  # 接近 ±90°
+        rect_aspect = rot_bw / max(rot_bh, 1)
+        recip_rect = 1 / rect_aspect if rect_aspect > 0 else float('inf')
+
+        # 检查宽高比是否互为倒数（方向已正确）
+        if abs(original_aspect - recip_rect) < 0.2:
+            # 方向已正确，不需要旋转
+            pass
+        else:
+            # 方向相反，需要旋转
+            needs_rotation = True
+            rotation_angle = -90 if original_aspect > rect_aspect else 90
+    elif abs(angle) > 3:  # 轻微倾斜（3-45°），需要微调
+        needs_rotation = True
+        rotation_angle = angle
+
+    if not needs_rotation:
+        return pil_img
 
     result = arr.copy()
-    rotated_flag = False
 
-    # 判断是否需要旋转矫正
-    if abs(angle) > 3 and adjust_angle:
-        rotated_flag = True
-        # 旋转图像以矫正角度
+    # 执行旋转矫正
+    # 对于 90° 旋转，直接交换宽高即可，不需要复杂的矩阵计算
+    if abs(rotation_angle) == 90:
+        # 旋转90°后，宽高互换
+        result = cv2.rotate(result, cv2.ROTATE_90_CLOCKWISE if rotation_angle == -90 else cv2.ROTATE_90_COUNTERCLOCKWISE)
+    else:
+        # 轻微旋转，使用旋转矩阵
         center = (cx, cy)
-        rot_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rot_matrix = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
 
         # 计算旋转后的边界
         cos = np.abs(rot_matrix[0, 0])
         sin = np.abs(rot_matrix[0, 1])
-        new_w = int(bh * sin + bw * cos)
-        new_h = int(bh * cos + bw * sin)
+        new_w = int(w * cos + h * sin)
+        new_h = int(w * sin + h * cos)
 
         # 调整旋转矩阵以包含整个图像
         rot_matrix[0, 2] += (new_w - w) / 2
         rot_matrix[1, 2] += (new_h - h) / 2
 
         # 执行旋转
-        result = cv2.warpAffine(arr, rot_matrix, (new_w, new_h),
+        result = cv2.warpAffine(result, rot_matrix, (new_w, new_h),
                                 flags=cv2.INTER_CUBIC,
                                 borderMode=cv2.BORDER_REPLICATE)
 
@@ -179,7 +209,7 @@ def _correct_rotation(pil_img: Image.Image, adjust_angle: bool = True) -> Image.
     # 顶部
     top_y = 0
     for y in range(result_gray.shape[0]):
-        if np.mean(result_gray[y, :] > 230) < 0.5:  # 如果这行超过50%非白
+        if np.mean(result_gray[y, :] > 230) < 0.5:
             top_y = y
             break
 
@@ -283,6 +313,163 @@ def _fix_orientation(pil_img: Image.Image) -> Image.Image:
     return pil_img
 
 
+def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
+    """综合多特征判断照片是否倒置并修正。
+
+    融合以下特征（按置信度加权）：
+    1. 亮度/饱和度差值分析（权重 35%）- 最可靠
+    2. 四角白边分布分析（权重 25%）
+    3. 文字结构方向检测（权重 20%）
+    4. 垂直边缘密度分析（权重 20%）
+
+    返回修正后的照片。
+    """
+    arr = np.array(pil_img)
+    h, w = arr.shape[:2]
+    if h < 100 or w < 100:
+        return pil_img
+
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+
+    # ═══════════════════════════════════════════
+    # 特征1：亮度/饱和度差值分析（最高权重 35%）
+    # ═══════════════════════════════════════════
+    top_bright = np.mean(gray[:h // 2])
+    bot_bright = np.mean(gray[h // 2:])
+    bright_diff = top_bright - bot_bright
+
+    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+    s = hsv[:, :, 1]
+    top_sat = np.mean(s[:h // 2])
+    bot_sat = np.mean(s[h // 2:])
+    sat_diff = top_sat - bot_sat
+
+    # 亮度差和饱和度差都大 → 高置信度
+    score_brightness = min(abs(bright_diff) / 80.0, 1.0)
+    score_saturation = min(abs(sat_diff) / 50.0, 1.0)
+    feature1_score = (score_brightness + score_saturation) / 2 * 0.35
+
+    # ═══════════════════════════════════════════
+    # 特征2：四角白边分布分析（权重 25%）
+    # ═══════════════════════════════════════════
+    corner_size = min(150, w // 5, h // 5)
+    tl = np.mean(gray[:corner_size, :corner_size] > 230)
+    tr = np.mean(gray[:corner_size, -corner_size:] > 230)
+    bl = np.mean(gray[-corner_size:, :corner_size] > 230)
+    br = np.mean(gray[-corner_size:, -corner_size:] > 230)
+
+    diag_diff = max(abs(tl - br), abs(tr - bl))
+    side_diff = max(abs((tl + tr) / 2 - (bl + br) / 2),
+                    abs((tl + bl) / 2 - (tr + br) / 2))
+
+    # 对角线差异大且单侧差异小 → 明显倒置
+    if diag_diff > 0.5 and side_diff < 0.3:
+        feature2_score = 0.8 * 0.25
+    elif diag_diff > 0.3:
+        feature2_score = 0.4 * 0.25
+    else:
+        feature2_score = 0.0
+
+    # ═══════════════════════════════════════════
+    # 特征3：文字结构方向检测（权重 20%）
+    # ═══════════════════════════════════════════
+    _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 2))
+    dilated = cv2.dilate(binary, kernel_h, iterations=1)
+    eroded = cv2.erode(dilated, kernel_h, iterations=1)
+    contours_h, _ = cv2.findContours(eroded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    top_lines = 0
+    bot_lines = 0
+    for c in contours_h:
+        if c.shape[0] > 10:
+            x, y, cw, ch = cv2.boundingRect(c)
+            center_y = y + ch / 2
+            if center_y < h // 3:
+                top_lines += 1
+            elif center_y >= 2 * h // 3:
+                bot_lines += 1
+
+    # 文字集中在顶部 → 可能倒置
+    if top_lines > bot_lines + 1:
+        feature3_score = 0.6 * 0.20
+    elif abs(top_lines - bot_lines) <= 1:
+        feature3_score = 0.0  # 分布均匀，无法判断
+    else:
+        feature3_score = 0.3 * 0.20  # 轻微倾向
+
+    # ═══════════════════════════════════════════
+    # 特征4：垂直边缘密度分析（权重 20%）
+    # ═══════════════════════════════════════════
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    magnitude = np.sqrt(sobelx**2 + sobely**2)
+
+    top_edges = np.mean(magnitude[:h // 2])
+    bot_edges = np.mean(magnitude[h // 2:])
+    edge_diff = abs(top_edges - bot_edges)
+
+    feature4_score = min(edge_diff / 100.0, 1.0) * 0.20
+
+    # ═══════════════════════════════════════════
+    # 综合评分与决策
+    # ═══════════════════════════════════════════
+    total_score = (feature1_score + feature2_score +
+                   feature3_score + feature4_score)
+
+    # 决策逻辑：
+    # 1. 如果亮度差特别大（>50），直接旋转
+    # 2. 否则按综合评分判断
+
+    if abs(bright_diff) > 50:
+        # 高置信度：直接旋转
+        rotated = cv2.rotate(arr, cv2.ROTATE_180)
+        return _crop_white_borders(Image.fromarray(rotated))
+    elif total_score > 0.5:
+        # 综合评分高，旋转
+        rotated = cv2.rotate(arr, cv2.ROTATE_180)
+        return _crop_white_borders(Image.fromarray(rotated))
+    elif total_score > 0.35 and diag_diff > 0.3:
+        # 中等置信度 + 白边差异，旋转
+        rotated = cv2.rotate(arr, cv2.ROTATE_180)
+        return _crop_white_borders(Image.fromarray(rotated))
+
+    return pil_img
+
+
+def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Image:
+    """裁剪照片周围的白边。
+
+    只裁剪边缘的纯白区域，保留内容区域。
+    使用每行/列白边比例 < 50% 的边界来确定裁剪区域。
+    """
+    arr = np.array(pil_img)
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    h, w = arr.shape[:2]
+
+    # 计算每行每列的白边比例
+    row_white_ratio = np.mean(gray > threshold, axis=1)
+    col_white_ratio = np.mean(gray > threshold, axis=0)
+
+    # 找到白边比例 < 50% 的行和列（内容区域）
+    content_rows = np.where(row_white_ratio < 0.5)[0]
+    content_cols = np.where(col_white_ratio < 0.5)[0]
+
+    if len(content_rows) == 0 or len(content_cols) == 0:
+        return pil_img
+
+    y1, y2 = content_rows[0], content_rows[-1]
+    x1, x2 = content_cols[0], content_cols[-1]
+
+    # 确保裁剪区域足够大（至少50x50）
+    if x2 - x1 < 50 or y2 - y1 < 50:
+        return pil_img
+
+    # 裁剪
+    cropped = arr[y1:y2+1, x1:x2+1]
+    return Image.fromarray(cropped)
+
+
 def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1):
     """将检测到的边界框裁剪并保存到输出目录。
     使用 PIL 保存以支持中文路径，并自动修正倒置照片和旋转角度。
@@ -299,6 +486,8 @@ def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, sta
         pil_img = _correct_rotation(pil_img)
         # 自动修正方向
         pil_img = _fix_orientation(pil_img)
+        # 检测白边分布并修正倾斜
+        pil_img = _check_white_border_rotation(pil_img)
         out_path = output_dir / f"{suffix}_{i:03d}.jpg"
         pil_img.save(str(out_path), "JPEG", quality=95)
         saved.append(out_path)
