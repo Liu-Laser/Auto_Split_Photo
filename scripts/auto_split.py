@@ -494,7 +494,7 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     """裁剪照片周围的白边。
 
     只裁剪边缘的纯白区域，保留内容区域。
-    使用每行/列白边比例 < 50% 的边界来确定裁剪区域。
+    使用每行/列白边比例和方差综合判断边界，避免误裁渐变过渡区。
     """
     arr = np.array(pil_img)
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
@@ -504,22 +504,72 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     row_white_ratio = np.mean(gray > threshold, axis=1)
     col_white_ratio = np.mean(gray > threshold, axis=0)
 
-    # 找到白边比例 < 50% 的行和列（内容区域）
-    content_rows = np.where(row_white_ratio < 0.5)[0]
-    content_cols = np.where(col_white_ratio < 0.5)[0]
+    # 计算每行的方差（用于检测渐变过渡区）
+    row_variance = np.var(gray, axis=1)
 
-    if len(content_rows) == 0 or len(content_cols) == 0:
+    # 找到白边比例 < 50% 的行（内容区域）
+    content_rows = np.where(row_white_ratio < 0.5)[0]
+
+    if len(content_rows) == 0:
         return pil_img
 
-    y1, y2 = content_rows[0], content_rows[-1]
-    x1, x2 = content_cols[0], content_cols[-1]
+    # 检查是否有渐变过渡区（白边比例逐渐增加但方差仍较高）
+    y_start = content_rows[0]
+    y_end_candidates = []
+
+    # 方法1: 使用原始阈值（50%）
+    content_rows_strict = np.where(row_white_ratio < 0.5)[0]
+    if len(content_rows_strict) > 0:
+        y_end_candidates.append(content_rows_strict[-1])
+
+    # 方法2: 放宽阈值（70%），保留更多渐变区
+    content_rows_relaxed = np.where(row_white_ratio < 0.7)[0]
+    if len(content_rows_relaxed) > 0:
+        y_end_candidates.append(content_rows_relaxed[-1])
+
+    # 方法3: 基于方差检测（方差突然下降的点）
+    # 找到方差从高位（>1000）骤降到低位（<500）的点
+    for i in range(h - 50, h):
+        if row_variance[i] < 500 and i > 0 and row_variance[i - 10] > 1000:
+            y_end_candidates.append(i - 10)
+            break
+
+    # 选择最保守的裁剪点（保留更多照片内容）
+    if y_end_candidates:
+        y_end = max(y_end_candidates)
+    else:
+        y_end = content_rows[-1]
+
+    # 列方向同样处理
+    content_cols = np.where(col_white_ratio < 0.5)[0]
+    if len(content_cols) == 0:
+        return pil_img
+
+    x_start = content_cols[0]
+    x_end_candidates = []
+
+    # 方法1: 使用原始阈值
+    content_cols_strict = np.where(col_white_ratio < 0.5)[0]
+    if len(content_cols_strict) > 0:
+        x_end_candidates.append(content_cols_strict[-1])
+
+    # 方法2: 放宽阈值
+    content_cols_relaxed = np.where(col_white_ratio < 0.7)[0]
+    if len(content_cols_relaxed) > 0:
+        x_end_candidates.append(content_cols_relaxed[-1])
+
+    # 选择最保守的裁剪点
+    if x_end_candidates:
+        x_end = max(x_end_candidates)
+    else:
+        x_end = content_cols[-1]
 
     # 确保裁剪区域足够大（至少50x50）
-    if x2 - x1 < 50 or y2 - y1 < 50:
+    if x_end - x_start < 50 or y_end - y_start < 50:
         return pil_img
 
     # 裁剪
-    cropped = arr[y1:y2+1, x1:x2+1]
+    cropped = arr[y_start:y_end + 1, x_start:x_end + 1]
     return Image.fromarray(cropped)
 
 
