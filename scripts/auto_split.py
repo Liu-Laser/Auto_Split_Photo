@@ -529,22 +529,27 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     x_start = content_cols[0]
 
     # ═══════════════════════════════════════════
-    # 多策略确定裁剪点，优先保护照片内容
+    # 改进：使用更宽松的阈值（20%），只裁剪明显纯白边
     # ═══════════════════════════════════════════
     y_end_candidates = []
     x_end_candidates = []
 
-    # 方法1: 宽松阈值（30%）- 只裁剪明显白边
+    # 方法1: 非常宽松阈值（20%）- 只裁剪明显白边
+    very_loose_rows = np.where(row_white_ratio < 0.2)[0]
+    if len(very_loose_rows) > 0:
+        y_end_candidates.append(very_loose_rows[-1])
+
+    # 方法2: 宽松阈值（30%）
     loose_rows = np.where(row_white_ratio < 0.3)[0]
     if len(loose_rows) > 0:
         y_end_candidates.append(loose_rows[-1])
 
-    # 方法2: 中阈值（50%）
+    # 方法3: 中阈值（50%）
     mid_rows = np.where(row_white_ratio < 0.5)[0]
     if len(mid_rows) > 0:
         y_end_candidates.append(mid_rows[-1])
 
-    # 方法3: 基于方差检测（方差骤降点）
+    # 方法4: 基于方差检测（方差骤降点）
     for i in range(h - 30, h):
         if row_variance[i] < 200 and i > 0 and row_variance[max(0, i-15)] > 500:
             y_end_candidates.append(i - 15)
@@ -554,6 +559,10 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     y_end = max(y_end_candidates) if y_end_candidates else content_rows[-1]
 
     # 列方向同样处理
+    very_loose_cols = np.where(col_white_ratio < 0.2)[0]
+    if len(very_loose_cols) > 0:
+        x_end_candidates.append(very_loose_cols[-1])
+
     loose_cols = np.where(col_white_ratio < 0.3)[0]
     if len(loose_cols) > 0:
         x_end_candidates.append(loose_cols[-1])
