@@ -158,16 +158,26 @@ def _correct_rotation(pil_img: Image.Image, adjust_angle: bool = True) -> Image.
 
     if abs(angle) > 45:  # 接近 ±90°
         rect_aspect = rot_bw / max(rot_bh, 1)
-        recip_rect = 1 / rect_aspect if rect_aspect > 0 else float('inf')
 
-        # 检查宽高比是否互为倒数（方向已正确）
-        if abs(original_aspect - recip_rect) < 0.2:
-            # 方向已正确，不需要旋转
-            pass
-        else:
-            # 方向相反，需要旋转
+        # 关键判断：当角度接近 ±90° 时
+        # minAreaRect 返回的是旋转后的尺寸
+        # 如果原始宽高比和 rect 宽高比"符号相反"（一个>1，一个<1）
+        # 说明内容本身旋转了90°，需要旋转回来
+
+        # 原始是横版（aspect > 1），但 rect 是竖版（aspect < 1）→ 内容旋转了
+        # 原始是竖版（aspect < 1），但 rect 是横版（aspect > 1）→ 内容旋转了
+
+        if original_aspect > 1 and rect_aspect < 1:
+            # 原始横版，内容竖版 → 需要逆时针旋转90°
             needs_rotation = True
-            rotation_angle = -90 if original_aspect > rect_aspect else 90
+            rotation_angle = 90
+        elif original_aspect < 1 and rect_aspect > 1:
+            # 原始竖版，内容横版 → 需要顺时针旋转90°
+            needs_rotation = True
+            rotation_angle = -90
+        else:
+            # 宽高比方向一致，内容方向正确
+            pass
     elif abs(angle) > 3:  # 轻微倾斜（3-45°），需要微调
         needs_rotation = True
         rotation_angle = angle
