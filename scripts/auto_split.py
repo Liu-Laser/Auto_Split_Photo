@@ -592,49 +592,51 @@ def _deskew_photo(pil_img: Image.Image) -> Image.Image:
         return Image.fromarray(rotated)
 
 
-def _enhance_image(pil_img: Image.Image, strength: float = 1.0) -> Image.Image:
-    """增强照片画质。
+def _enhance_image(pil_img: Image.Image, strength: float = 0.5) -> Image.Image:
+    """增强照片画质（轻度增强，适合人像）。
 
-    应用以下增强效果：
-    1. 对比度增强（CLAHE）
-    2. 锐化
-    3. 去噪（可选）
+    应用以下增强效果（强度可调）：
+    1. 对比度增强（CLAHE，轻度）
+    2. 锐化（轻微）
+    3. 去噪（保持边缘）
 
     参数：
         pil_img: 输入图片
-        strength: 增强强度（0.0-1.0），默认 1.0
+        strength: 增强强度（0.0-1.0），默认 0.5（轻度）
+                 0.0 = 不增强，1.0 = 最大增强
 
     返回增强后的照片。
     """
     arr = np.array(pil_img)
     h, w = arr.shape[:2]
 
-    # 转换为 BGR（OpenCV 格式）
+    # 转换到 BGR（OpenCV 格式）
     bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
-    # ── 1. 对比度增强（CLAHE）──
+    # ── 1. 对比度增强（CLAHE，轻度）──
     # 转换到 LAB 色彩空间
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     l, a, b_ch = cv2.split(lab)
 
-    # 应用 CLAHE（限制对比度自适应直方图均衡化）
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # 应用 CLAHE（clipLimit 降低，tileGridSize 增大）
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(16, 16))
     l = clahe.apply(l)
 
     # 合并通道并转回 BGR
     lab = cv2.merge([l, a, b_ch])
-    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    contrast_enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-    # ── 2. 锐化 ──
-    # 使用 unsharp mask 技术
-    blur = cv2.GaussianBlur(enhanced, (0, 0), 3)
-    sharpened = cv2.addWeighted(enhanced, 1.5, blur, -0.5, 0)
+    # ── 2. 锐化（轻微）──
+    # 使用 unsharp mask 技术，但降低权重
+    blur = cv2.GaussianBlur(contrast_enhanced, (0, 0), 2)
+    sharpened = cv2.addWeighted(contrast_enhanced, 1.2, blur, -0.2, 0)
 
     # ── 3. 轻微去噪（可选）──
     # 使用双边滤波保持边缘的同时去噪
-    denoised = cv2.bilateralFilter(sharpened, d=5, sigmaColor=50, sigmaSpace=50)
+    denoised = cv2.bilateralFilter(sharpened, d=3, sigmaColor=30, sigmaSpace=30)
 
-    # 根据 strength 混合原始图像和增强图像
+    # ── 4. 根据 strength 混合原始图像和增强图像 ──
+    # strength=0.5 表示 50% 增强效果
     result = cv2.addWeighted(denoised, strength, arr, 1 - strength, 0)
 
     # 转回 RGB
