@@ -10,7 +10,7 @@ def install(package):
 
 
 if __name__ == "__main__":
-    deps = ["opencv-python", "Pillow", "numpy", "mediapipe"]
+    deps = ["opencv-python", "Pillow", "numpy"]
     for dep in deps:
         try:
             __import__(dep.replace("-", "_"))

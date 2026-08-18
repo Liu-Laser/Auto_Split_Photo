@@ -312,229 +312,15 @@ def _fix_orientation(pil_img: Image.Image) -> Image.Image:
     return pil_img
 
 
-def _detect_face_orientation(pil_img: Image.Image) -> dict:
-    """检测照片中的人像站立方向。
-
-    分析人脸的位置、大小比例和分布，判断照片是否旋转。
-
-    返回：
-        {
-            'orientation': 'upright' | 'rotated_90' | 'rotated_180' | 'rotated_270',
-            'confidence': float,
-            'faces': list of (x, y, w, h)
-        }
-    """
-    arr = np.array(pil_img)
-    h, w = arr.shape[:2]
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-
-    # 使用多个分类器提高检测率
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30))
-
-    if faces is None or len(faces) == 0:
-        return {'orientation': 'unknown', 'confidence': 0.0, 'faces': []}
-
-    face_data = []
-    for x, y, fw, fh in faces:
-        # 计算人脸中心点
-        cx = x + fw / 2
-        cy = y + fh / 2
-
-        # 计算人脸宽高比
-        aspect_ratio = fw / max(fh, 1)
-
-        # 计算人脸在照片中的相对位置
-        rel_x = cx / w
-        rel_y = cy / h
-
-        # 计算人脸大小（相对于照片）
-        face_size_ratio = (fw * fh) / (w * h)
-
-        face_data.append({
-            'x': x, 'y': y, 'w': fw, 'h': fh,
-            'cx': cx, 'cy': cy,
-            'aspect_ratio': aspect_ratio,
-            'rel_x': rel_x,
-            'rel_y': rel_y,
-            'size_ratio': face_size_ratio
-        })
-
-    # 分析人脸分布
-    avg_rel_x = np.mean([f['rel_x'] for f in face_data])
-    avg_rel_y = np.mean([f['rel_y'] for f in face_data])
-    avg_aspect = np.mean([f['aspect_ratio'] for f in face_data])
-    avg_size = np.mean([f['size_ratio'] for f in face_data])
-
-    # 判断旋转状态
-    orientation = 'upright'
-    confidence = 0.5
-
-    # 规则1：如果人脸宽高比异常（横向人脸）→ 可能旋转了90°
-    if avg_aspect > 1.2:
-        orientation = 'rotated_90'
-        confidence = 0.7
-    elif avg_aspect < 0.8:
-        # 人脸竖向，检查位置
-        if avg_rel_y < 0.3:
-            orientation = 'upright'
-            confidence = 0.8
-        elif avg_rel_y > 0.7:
-            orientation = 'rotated_180'
-            confidence = 0.7
-
-    # 规则2：如果人脸集中在照片一侧（水平）→ 可能旋转了90°或270°
-    if avg_rel_x < 0.25:
-        orientation = 'rotated_270'  # 人脸在左侧
-        confidence = max(confidence, 0.6)
-    elif avg_rel_x > 0.75:
-        orientation = 'rotated_90'  # 人脸在右侧
-        confidence = max(confidence, 0.6)
-
-    # 规则3：根据人脸大小判断
-    # 旋转90°后，人脸会显得更小（因为照片变窄了）
-    if avg_size < 0.005 and len(faces) > 0:
-        # 人脸非常小，可能是旋转后的效果
-        if orientation == 'upright':
-            orientation = 'rotated_90'
-            confidence = 0.5
-
-    return {
-        'orientation': orientation,
-        'confidence': confidence,
-        'faces': face_data
-    }
-
-
-def _detect_face_90deg_rotation(pil_img: Image.Image) -> dict:
-    """使用 Haar 级联检测人脸，分析人脸宽高比判断照片是否旋转了 90° 或 270°。
-    正常站立的人脸应该是竖向的（宽高比 < 1），如果检测到横向人脸则可能旋转了 90°/270°。
-
-    返回：
-        {
-            'orientation': 'upright' | 'rotated_90' | 'rotated_270' | 'unknown',
-            'confidence': float,
-            'face_count': int,
-            'avg_aspect_ratio': float,
-        }
-    """
-    arr = np.array(pil_img)
-    h, w = arr.shape[:2]
-    if h < 100 or w < 100:
-        return {'orientation': 'unknown', 'confidence': 0.0, 'face_count': 0, 'avg_aspect_ratio': 0.0}
-
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-
-    # 使用多个分类器检测不同朝向的人脸
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(20, 20))
-
-    if faces is None or len(faces) == 0:
-        return {'orientation': 'unknown', 'confidence': 0.0, 'face_count': 0, 'avg_aspect_ratio': 0.0}
-
-    # 计算所有人脸的平均宽高比
-    aspect_ratios = [fw / max(fh, 1) for x, y, fw, fh in faces]
-    avg_aspect = np.mean(aspect_ratios)
-
-    # 计算人脸在照片中的相对位置
-    face_centers_x = [(x + fw/2) / w for x, y, fw, fh in faces]
-    face_centers_y = [(y + fh/2) / h for x, y, fw, fh in faces]
-    avg_center_x = np.mean(face_centers_x)
-    avg_center_y = np.mean(face_centers_y)
-
-    orientation = 'upright'
-    confidence = 0.5
-
-    # 规则1：人脸宽高比异常（横向人脸）→ 可能旋转了 90° 或 270°
-    if avg_aspect > 1.2:
-        orientation = 'rotated_90' if avg_center_x < 0.5 else 'rotated_270'
-        confidence = 0.7
-    elif avg_aspect < 0.7:
-        # 人脸竖向，正常
-        orientation = 'upright'
-        confidence = 0.8
-    else:
-        # 宽高比正常，检查位置
-        if avg_center_x < 0.25:
-            orientation = 'rotated_270'
-            confidence = 0.6
-        elif avg_center_x > 0.75:
-            orientation = 'rotated_90'
-            confidence = 0.6
-
-    return {
-        'orientation': orientation,
-        'confidence': confidence,
-        'face_count': len(faces),
-        'avg_aspect_ratio': avg_aspect,
-    }
-
-
-def _estimate_pose_orientation(pil_img: Image.Image) -> dict:
-    """使用亮度/饱和度梯度分析估计照片方向。
-    通过分析图像上半部分和下半部分的梯度差异来判断是否旋转。
-
-    返回：
-        {
-            'orientation': 'upright' | 'rotated_180' | 'unknown',
-            'confidence': float,
-            'gradient_score': float,
-        }
-    """
-    arr = np.array(pil_img)
-    h, w = arr.shape[:2]
-    if h < 100 or w < 100:
-        return {'orientation': 'unknown', 'confidence': 0.0, 'gradient_score': 0.0}
-
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY).astype(np.float32)
-
-    # 计算垂直梯度
-    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-
-    # 分析上半部分和下半部分的梯度特征
-    top_half = sobely[:h//2, :]
-    bot_half = sobely[h//2:, :]
-
-    # 上半部分的负梯度（向下边缘）应该更多（头部到身体）
-    top_neg_grad = np.mean(top_half[top_half < 0])
-    bot_neg_grad = np.mean(bot_half[bot_half < 0])
-
-    # 下半部分的正梯度（向上边缘）应该更多（脚到身体）
-    top_pos_grad = np.mean(top_half[top_half > 0])
-    bot_pos_grad = np.mean(bot_half[bot_half > 0])
-
-    # 计算梯度分数
-    gradient_score = (bot_neg_grad - top_neg_grad) + (top_pos_grad - bot_pos_grad)
-
-    # 归一化
-    gradient_score = gradient_score / (abs(gradient_score) + 1)
-
-    orientation = 'upright'
-    confidence = 0.5
-
-    if gradient_score < -0.3:
-        orientation = 'rotated_180'
-        confidence = 0.6
-    elif gradient_score > 0.3:
-        orientation = 'upright'
-        confidence = 0.6
-
-    return {
-        'orientation': orientation,
-        'confidence': confidence,
-        'gradient_score': gradient_score,
-    }
-
-
 def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     """综合多特征判断照片是否倒置并修正。
 
     融合以下特征（按置信度加权）：
-    1. 人脸位置分析（权重 30%）- 最可靠
-    2. 人脸宽高比分析（权重 25%）- 检测 90°/270° 旋转
-    3. 亮度/饱和度差值分析（权重 20%）
-    4. 四角白边分布分析（权重 15%）
-    5. 文字结构方向检测（权重 10%）
+    1. 人脸位置分析（权重 40%）- 最可靠
+    2. 亮度/饱和度差值分析（权重 25%）
+    3. 四角白边分布分析（权重 20%）
+    4. 文字结构方向检测（权重 10%）
+    5. 垂直边缘密度分析（权重 5%）
 
     返回修正后的照片。
     """
@@ -546,7 +332,7 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
     # ═══════════════════════════════════════════
-    # 特征1：人脸位置分析（权重 30%）
+    # 特征1：人脸位置分析（最高权重 40%）
     # ═══════════════════════════════════════════
     face_score = 0.0
     faces = None
@@ -554,39 +340,41 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30))
 
-        if faces is not None and len(faces) >= 2:
+        if faces is not None and len(faces) >= 2:  # 至少2个人脸才可靠
+            # 统计人脸在上下半部分的分布
             top_faces = sum(1 for x, y, fw, fh in faces if y + fh < h // 2)
             bot_faces = len(faces) - top_faces
             total_faces = len(faces)
 
+            # 计算人脸中心位置的分布
             face_centers_y = [(y + fh/2) / h for x, y, fw, fh in faces]
             avg_center = np.mean(face_centers_y)
 
+            # 决策逻辑：
+            # 人脸集中在底部（>60%在底部）→ 明显倒置
+            # 人脸集中在顶部（>60%在顶部）→ 正常
+            # 分布均匀 → 无法判断
             if bot_faces / total_faces > 0.6:
-                face_score = 0.8
+                face_score = 0.8  # 高置信度倒置
             elif top_faces / total_faces > 0.6:
-                face_score = 0.2
+                face_score = 0.1  # 正常
             elif abs(avg_center - 0.5) < 0.1:
-                face_score = 0.4
+                face_score = 0.3  # 分布均匀，不确定
             else:
-                face_score = 0.5
+                face_score = 0.5  # 中等置信度
         elif faces is not None and len(faces) == 1:
+            # 单个人脸，检查位置
             x, y, fw, fh = faces[0]
             face_center_y = (y + fh/2) / h
             if face_center_y > 0.6:
-                face_score = 0.6
+                face_score = 0.6  # 人脸在底部，可能倒置
             elif face_center_y < 0.4:
-                face_score = 0.2
+                face_score = 0.2  # 人脸在顶部，正常
     except:
-        pass
+        pass  # 人脸检测失败不影响其他判断
 
     # ═══════════════════════════════════════════
-    # 特征2：人脸宽高比分析（权重 25%）- 检测 90°/270° 旋转
-    # ═══════════════════════════════════════════
-    face_90_result = _detect_face_90deg_rotation(pil_img)
-
-    # ═══════════════════════════════════════════
-    # 特征3：亮度/饱和度差值分析（权重 20%）
+    # 特征2：亮度/饱和度差值分析（权重 25%）
     # ═══════════════════════════════════════════
     top_bright = np.mean(gray[:h // 2])
     bot_bright = np.mean(gray[h // 2:])
@@ -598,12 +386,13 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     bot_sat = np.mean(s[h // 2:])
     sat_diff = top_sat - bot_sat
 
+    # 亮度差和饱和度差都大 → 高置信度
     score_brightness = min(abs(bright_diff) / 80.0, 1.0)
     score_saturation = min(abs(sat_diff) / 50.0, 1.0)
-    feature3_score = (score_brightness + score_saturation) / 2 * 0.20
+    feature2_score = (score_brightness + score_saturation) / 2 * 0.25
 
     # ═══════════════════════════════════════════
-    # 特征4：四角白边分布分析（权重 15%）
+    # 特征3：四角白边分布分析（权重 20%）
     # ═══════════════════════════════════════════
     corner_size = min(150, w // 5, h // 5)
     tl = np.mean(gray[:corner_size, :corner_size] > 230)
@@ -615,15 +404,16 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     side_diff = max(abs((tl + tr) / 2 - (bl + br) / 2),
                     abs((tl + bl) / 2 - (tr + br) / 2))
 
+    # 对角线差异大且单侧差异小 → 明显倒置
     if diag_diff > 0.5 and side_diff < 0.3:
-        feature4_score = 0.8 * 0.15
+        feature3_score = 0.8 * 0.20
     elif diag_diff > 0.3:
-        feature4_score = 0.4 * 0.15
+        feature3_score = 0.4 * 0.20
     else:
-        feature4_score = 0.0
+        feature3_score = 0.0
 
     # ═══════════════════════════════════════════
-    # 特征5：文字结构方向检测（权重 10%）
+    # 特征4：文字结构方向检测（权重 10%）
     # ═══════════════════════════════════════════
     _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
     kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 2))
@@ -642,44 +432,57 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
             elif center_y >= 2 * h // 3:
                 bot_lines += 1
 
+    # 文字集中在顶部 → 可能倒置
     if top_lines > bot_lines + 1:
-        feature5_score = 0.6 * 0.10
+        feature4_score = 0.6 * 0.10
     elif abs(top_lines - bot_lines) <= 1:
-        feature5_score = 0.0
+        feature4_score = 0.0  # 分布均匀，无法判断
     else:
-        feature5_score = 0.3 * 0.10
+        feature4_score = 0.3 * 0.10  # 轻微倾向
 
     # ═══════════════════════════════════════════
-    # 综合决策
+    # 特征5：垂直边缘密度分析（权重 5%）
     # ═══════════════════════════════════════════
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    magnitude = np.sqrt(sobelx**2 + sobely**2)
 
-    # 首先处理 90°/270° 旋转
-    if face_90_result['orientation'] == 'rotated_90' and face_90_result['confidence'] > 0.6:
-        rotated = cv2.rotate(arr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        return _crop_white_borders(Image.fromarray(rotated))
-    elif face_90_result['orientation'] == 'rotated_270' and face_90_result['confidence'] > 0.6:
-        rotated = cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
-        return _crop_white_borders(Image.fromarray(rotated))
+    top_edges = np.mean(magnitude[:h // 2])
+    bot_edges = np.mean(magnitude[h // 2:])
+    edge_diff = abs(top_edges - bot_edges)
 
-    # 然后处理 180° 旋转
-    total_score = (face_score * 0.30 +
-                   face_90_result['confidence'] * 0.15 if face_90_result['orientation'] == 'unknown' else 0.0 +
+    feature5_score = min(edge_diff / 100.0, 1.0) * 0.05
+
+    # ═══════════════════════════════════════════
+    # 综合评分与决策
+    # ═══════════════════════════════════════════
+    total_score = (face_score * 0.40 +
+                   feature2_score +
                    feature3_score +
                    feature4_score +
                    feature5_score)
 
+    # 决策逻辑：
+    # 1. 如果人脸检测高置信度（>0.6），优先按人脸判断
+    # 2. 否则按综合评分判断
+
     if face_score >= 0.6:
+        # 人脸检测高置信度，直接旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
     elif face_score <= 0.2 and faces is not None and len(faces) >= 2:
+        # 人脸检测低置信度（正常），不旋转
         pass
     elif abs(bright_diff) > 50:
+        # 亮度差特别大，直接旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.35:
+    elif total_score > 0.45:
+        # 综合评分高，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.25 and diag_diff > 0.3:
+    elif total_score > 0.3 and diag_diff > 0.3:
+        # 中等置信度 + 白边差异，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
 
