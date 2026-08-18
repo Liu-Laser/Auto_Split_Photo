@@ -475,7 +475,7 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     elif face_score <= 0.2 and faces is not None and len(faces) >= 2:
         # 人脸检测低置信度（正常），不旋转
         pass
-    elif abs(bright_diff) > 50:
+    elif abs(bright_diff) > 80:  # 提高阈值，避免误判
         # 亮度差特别大，直接旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
@@ -483,7 +483,7 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
         # 综合评分高，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.3 and diag_diff > 0.3:
+    elif total_score > 0.3 and diag_diff > 0.5:  # 提高白边差异阈值
         # 中等置信度 + 白边差异，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
