@@ -158,15 +158,16 @@ def _correct_rotation(pil_img: Image.Image, adjust_angle: bool = True) -> Image.
 
     if abs(angle) > 45:  # 接近 ±90°
         rect_aspect = rot_bw / max(rot_bh, 1)
+        recip_rect = 1 / rect_aspect if rect_aspect > 0 else float('inf')
 
-        # 判断内容是否旋转了90°
-        # 如果原始是横版（aspect > 1）但 rect 是竖版（aspect < 1），或反之
-        original_is_landscape = original_aspect > 1.0
-        rect_is_landscape = rect_aspect > 1.0
-
-        if original_is_landscape != rect_is_landscape:
+        # 检查宽高比是否互为倒数（方向已正确）
+        if abs(original_aspect - recip_rect) < 0.2:
+            # 方向已正确，不需要旋转
+            pass
+        else:
+            # 方向相反，需要旋转
             needs_rotation = True
-            rotation_angle = 90 if original_is_landscape else -90
+            rotation_angle = -90 if original_aspect > rect_aspect else 90
     elif abs(angle) > 3:  # 轻微倾斜（3-45°），需要微调
         needs_rotation = True
         rotation_angle = angle
@@ -316,11 +317,10 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     """综合多特征判断照片是否倒置并修正。
 
     融合以下特征（按置信度加权）：
-    1. 人脸位置分析（权重 40%）- 最可靠
-    2. 亮度/饱和度差值分析（权重 25%）
-    3. 四角白边分布分析（权重 20%）
-    4. 文字结构方向检测（权重 10%）
-    5. 垂直边缘密度分析（权重 5%）
+    1. 亮度/饱和度差值分析（权重 35%）- 最可靠
+    2. 四角白边分布分析（权重 25%）
+    3. 文字结构方向检测（权重 20%）
+    4. 垂直边缘密度分析（权重 20%）
 
     返回修正后的照片。
     """
@@ -332,49 +332,7 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
     # ═══════════════════════════════════════════
-    # 特征1：人脸位置分析（最高权重 40%）
-    # ═══════════════════════════════════════════
-    face_score = 0.0
-    faces = None
-    try:
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30))
-
-        if faces is not None and len(faces) >= 2:  # 至少2个人脸才可靠
-            # 统计人脸在上下半部分的分布
-            top_faces = sum(1 for x, y, fw, fh in faces if y + fh < h // 2)
-            bot_faces = len(faces) - top_faces
-            total_faces = len(faces)
-
-            # 计算人脸中心位置的分布
-            face_centers_y = [(y + fh/2) / h for x, y, fw, fh in faces]
-            avg_center = np.mean(face_centers_y)
-
-            # 决策逻辑：
-            # 人脸集中在底部（>60%在底部）→ 明显倒置
-            # 人脸集中在顶部（>60%在顶部）→ 正常
-            # 分布均匀 → 无法判断
-            if bot_faces / total_faces > 0.6:
-                face_score = 0.8  # 高置信度倒置
-            elif top_faces / total_faces > 0.6:
-                face_score = 0.1  # 正常
-            elif abs(avg_center - 0.5) < 0.1:
-                face_score = 0.3  # 分布均匀，不确定
-            else:
-                face_score = 0.5  # 中等置信度
-        elif faces is not None and len(faces) == 1:
-            # 单个人脸，检查位置
-            x, y, fw, fh = faces[0]
-            face_center_y = (y + fh/2) / h
-            if face_center_y > 0.6:
-                face_score = 0.6  # 人脸在底部，可能倒置
-            elif face_center_y < 0.4:
-                face_score = 0.2  # 人脸在顶部，正常
-    except:
-        pass  # 人脸检测失败不影响其他判断
-
-    # ═══════════════════════════════════════════
-    # 特征2：亮度/饱和度差值分析（权重 25%）
+    # 特征1：亮度/饱和度差值分析（最高权重 35%）
     # ═══════════════════════════════════════════
     top_bright = np.mean(gray[:h // 2])
     bot_bright = np.mean(gray[h // 2:])
@@ -389,10 +347,10 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     # 亮度差和饱和度差都大 → 高置信度
     score_brightness = min(abs(bright_diff) / 80.0, 1.0)
     score_saturation = min(abs(sat_diff) / 50.0, 1.0)
-    feature2_score = (score_brightness + score_saturation) / 2 * 0.25
+    feature1_score = (score_brightness + score_saturation) / 2 * 0.35
 
     # ═══════════════════════════════════════════
-    # 特征3：四角白边分布分析（权重 20%）
+    # 特征2：四角白边分布分析（权重 25%）
     # ═══════════════════════════════════════════
     corner_size = min(150, w // 5, h // 5)
     tl = np.mean(gray[:corner_size, :corner_size] > 230)
@@ -406,14 +364,14 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
 
     # 对角线差异大且单侧差异小 → 明显倒置
     if diag_diff > 0.5 and side_diff < 0.3:
-        feature3_score = 0.8 * 0.20
+        feature2_score = 0.8 * 0.25
     elif diag_diff > 0.3:
-        feature3_score = 0.4 * 0.20
+        feature2_score = 0.4 * 0.25
     else:
-        feature3_score = 0.0
+        feature2_score = 0.0
 
     # ═══════════════════════════════════════════
-    # 特征4：文字结构方向检测（权重 10%）
+    # 特征3：文字结构方向检测（权重 20%）
     # ═══════════════════════════════════════════
     _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
     kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 2))
@@ -434,14 +392,14 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
 
     # 文字集中在顶部 → 可能倒置
     if top_lines > bot_lines + 1:
-        feature4_score = 0.6 * 0.10
+        feature3_score = 0.6 * 0.20
     elif abs(top_lines - bot_lines) <= 1:
-        feature4_score = 0.0  # 分布均匀，无法判断
+        feature3_score = 0.0  # 分布均匀，无法判断
     else:
-        feature4_score = 0.3 * 0.10  # 轻微倾向
+        feature3_score = 0.3 * 0.20  # 轻微倾向
 
     # ═══════════════════════════════════════════
-    # 特征5：垂直边缘密度分析（权重 5%）
+    # 特征4：垂直边缘密度分析（权重 20%）
     # ═══════════════════════════════════════════
     sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
     sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
@@ -451,37 +409,27 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     bot_edges = np.mean(magnitude[h // 2:])
     edge_diff = abs(top_edges - bot_edges)
 
-    feature5_score = min(edge_diff / 100.0, 1.0) * 0.05
+    feature4_score = min(edge_diff / 100.0, 1.0) * 0.20
 
     # ═══════════════════════════════════════════
     # 综合评分与决策
     # ═══════════════════════════════════════════
-    total_score = (face_score * 0.40 +
-                   feature2_score +
-                   feature3_score +
-                   feature4_score +
-                   feature5_score)
+    total_score = (feature1_score + feature2_score +
+                   feature3_score + feature4_score)
 
     # 决策逻辑：
-    # 1. 如果人脸检测高置信度（>0.6），优先按人脸判断
+    # 1. 如果亮度差特别大（>50），直接旋转
     # 2. 否则按综合评分判断
 
-    if face_score >= 0.6:
-        # 人脸检测高置信度，直接旋转
+    if abs(bright_diff) > 50:
+        # 高置信度：直接旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif face_score <= 0.2 and faces is not None and len(faces) >= 2:
-        # 人脸检测低置信度（正常），不旋转
-        pass
-    elif abs(bright_diff) > 50:
-        # 亮度差特别大，直接旋转
-        rotated = cv2.rotate(arr, cv2.ROTATE_180)
-        return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.45:
+    elif total_score > 0.5:
         # 综合评分高，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.3 and diag_diff > 0.3:
+    elif total_score > 0.35 and diag_diff > 0.3:
         # 中等置信度 + 白边差异，旋转
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
@@ -522,100 +470,10 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     return Image.fromarray(cropped)
 
 
-def _deskew_photo(pil_img: Image.Image) -> Image.Image:
-    """检测并矫正照片的倾斜角度。
-
-    使用边缘检测和最小外接矩形来检测倾斜角度，
-    然后旋转矫正。
-
-    返回矫正后的照片。
-    """
-    arr = np.array(pil_img)
-    h, w = arr.shape[:2]
-    if h < 100 or w < 100:
-        return pil_img
-
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-
-    # 创建非白色区域掩码（照片内容）
-    _, binary = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY_INV)
-
-    # 查找轮廓
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # 找最大的非白区域（照片主体）
-    largest_cnt = None
-    largest_area = 0
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area > largest_area and area > 5000:
-            largest_area = area
-            largest_cnt = cnt
-
-    if largest_cnt is None or largest_area < 10000:
-        return pil_img
-
-    # 计算最小外接旋转矩形
-    rect = cv2.minAreaRect(largest_cnt)
-    (cx, cy), (rot_bw, rot_bh), angle = rect
-
-    # 判断是否需要旋转
-    # 如果角度接近 ±90°，说明照片本身可能是横版/竖版，不需要旋转
-    # 只有轻微倾斜（3-45°）时才需要旋转矫正
-    if abs(angle) > 45:
-        # 角度大，可能是横竖版问题，跳过
-        return pil_img
-    elif abs(angle) < 3:
-        # 角度太小，不需要旋转
-        return pil_img
-    else:
-        # 执行旋转矫正
-        center = (cx, cy)
-        rot_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-
-        # 计算旋转后的边界
-        cos = np.abs(rot_matrix[0, 0])
-        sin = np.abs(rot_matrix[0, 1])
-        new_w = int(w * cos + h * sin)
-        new_h = int(w * sin + h * cos)
-
-        # 调整旋转矩阵以包含整个图像
-        rot_matrix[0, 2] += (new_w - w) / 2
-        rot_matrix[1, 2] += (new_h - h) / 2
-
-        # 执行旋转
-        rotated = cv2.warpAffine(arr, rot_matrix, (new_w, new_h),
-                                flags=cv2.INTER_CUBIC,
-                                borderMode=cv2.BORDER_REPLICATE)
-
-        return Image.fromarray(rotated)
-
-
-def _enhance_image(pil_img: Image.Image, strength: float = 0.3) -> Image.Image:
-    """轻微调整对比度（仅微调，保持原始效果）。
-
-    参数：
-        pil_img: 输入图片
-        strength: 增强强度（0.0-1.0），默认 0.3（轻度）
-
-    返回微调后的照片。
-    """
-    arr = np.array(pil_img)
-
-    # 仅使用简单的 gamma 校正微调对比度
-    gamma = 1.0 + (1.0 - strength) * 0.3  # strength=0.3 时 gamma≈1.21
-    inv_gamma = 1.0 / gamma
-    table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-    result = cv2.LUT(arr, table)
-
-    return Image.fromarray(result)
-
-
-def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1, enhance: bool = True):
+def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1):
     """将检测到的边界框裁剪并保存到输出目录。
     使用 PIL 保存以支持中文路径，并自动修正倒置照片和旋转角度。
     start_index: 起始编号（用于批量顺序编号）
-    enhance: 是否启用画质增强
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     saved = []
@@ -630,13 +488,6 @@ def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, sta
         pil_img = _fix_orientation(pil_img)
         # 检测白边分布并修正倾斜
         pil_img = _check_white_border_rotation(pil_img)
-        # 裁剪白边
-        pil_img = _crop_white_borders(pil_img)
-        # 倾斜矫正
-        pil_img = _deskew_photo(pil_img)
-        # 画质增强（可选）
-        if enhance:
-            pil_img = _enhance_image(pil_img)
         out_path = output_dir / f"{suffix}_{i:03d}.jpg"
         pil_img.save(str(out_path), "JPEG", quality=95)
         saved.append(out_path)
