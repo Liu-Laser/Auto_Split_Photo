@@ -888,6 +888,10 @@ def detect_by_otsu(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
     使用 Otsu 自适应阈值分割，适合照片之间无白边、直接贴在卡纸上的扫描件。
     通过亮度二值化 + 形态学操作提取照片区域。
     返回 sorted boxes: [(x, y, w, h), ...]
+
+    关键改进：添加6寸照片宽高比约束
+    - 6寸照片标准比例：102/152 = 0.671（竖版）或 152/102 = 1.490（横版）
+    - 允许误差：±10%，即 0.60-0.74 或 1.34-1.64
     """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.uint8)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -903,6 +907,13 @@ def detect_by_otsu(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
 
     boxes = []
     full_area = img.shape[1] * img.shape[0]
+
+    # 6寸照片宽高比约束
+    # 竖版：0.671 ± 10% = 0.60 - 0.74
+    # 横版：1.490 ± 10% = 1.34 - 1.64
+    MIN_ASPECT = 0.55  # 允许的最小宽高比（竖版）
+    MAX_ASPECT = 1.70  # 允许的最大宽高比（横版）
+
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_size * min_size:
@@ -914,8 +925,14 @@ def detect_by_otsu(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
         if bw * bh > full_area * 0.85:
             continue
         aspect = bw / max(bh, 1)
-        if aspect < 0.2 or aspect > 5.0:
+
+        # 检查是否符合6寸照片宽高比
+        is_valid_aspect = (MIN_ASPECT <= aspect <= MAX_ASPECT)
+
+        if not is_valid_aspect:
+            # 不符合6寸比例，记录但跳过
             continue
+
         boxes.append((x, y, bw, bh))
 
     boxes = merge_close_boxes(boxes, gap)
