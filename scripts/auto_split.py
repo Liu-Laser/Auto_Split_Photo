@@ -19,7 +19,6 @@ auto_split.py — 从扫描图中自动检测并分割多张照片
 import argparse
 import os
 import sys
-import io
 import warnings
 from pathlib import Path
 
@@ -527,15 +526,15 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     print(f"  [裁剪] 对角线差异={diag_diff:.2f}, 平均={avg_corner_white:.0%}")
 
     # 如果四角平均白边比例很高（>50%），说明是扫描纸边缘，不要裁剪
+    print(f"  [调试] avg_corner_white={avg_corner_white:.3f}")
     if avg_corner_white > 0.5:
         print(f"  [裁剪] 检测到扫描纸边缘，不裁剪")
         return pil_img
 
-    # ═══════════════════════════════════════════
-    # 6寸照片标准尺寸保护
-    # ═══════════════════════════════════════════
-    MIN_PHOTO_WIDTH = 800
-    MIN_PHOTO_HEIGHT = 1000
+    # 如果某单角白边特别高（>90%）且其他角正常，可能是扫描纸遮挡，不裁剪
+    if max(tl, tr, bl, br) > 0.9 and min(tl, tr, bl, br) < 0.2:
+        print(f"  [裁剪] 检测到单侧过高白边（可能是扫描纸遮挡），不裁剪")
+        return pil_img
 
     # 找到主要内容区域（白边比例 < 5%）
     content_rows = np.where(row_white_ratio < 0.05)[0]
@@ -546,6 +545,9 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
 
     y_start = content_rows[0]
     x_start = content_cols[0]
+
+    # 打印裁剪前的尺寸信息
+    print(f"  [调试] 原始区域尺寸: {w}x{h}")
 
     # ═══════════════════════════════════════════
     # 非常保守的裁剪策略：只裁剪明显纯白边（< 5%）
@@ -578,26 +580,34 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
 
     x_end = max(x_end_candidates) if x_end_candidates else content_cols[-1]
 
+    # 确保裁剪区域足够大
+    if x_end - x_start < 50 or y_end - y_start < 50:
+        return pil_img
+
     # ═══════════════════════════════════════════
-    # 6寸照片尺寸保护
+    # 动态照片尺寸保护
     # ═══════════════════════════════════════════
     cropped_height = y_end - y_start + 1
     cropped_width = x_end - x_start + 1
 
-    if cropped_height < MIN_PHOTO_HEIGHT or cropped_width < MIN_PHOTO_WIDTH:
-        print(f"  [保护] 裁剪后尺寸 {cropped_width}x{cropped_height} 小于标准，不裁剪")
+    # 如果裁剪后的宽高比与原始区域严重不符（可能是检测错误）
+    original_aspect = w / h
+    cropped_aspect = cropped_width / cropped_height
+
+    if abs(cropped_aspect - original_aspect) > 0.2:
+        print(f"  [保护] 宽高比异常 ({cropped_aspect:.2f} vs {original_aspect:.2f})，保持原始尺寸")
         return pil_img
 
-    # 确保至少保留 99% 的内容
-    min_height = max(MIN_PHOTO_HEIGHT, int(h * 0.99))
-    min_width = max(MIN_PHOTO_WIDTH, int(w * 0.99))
-    if cropped_height < min_height:
-        y_end = y_start + min_height - 1
-    if cropped_width < min_width:
-        x_end = x_start + min_width - 1
+    # 如果照片明显被拉伸（像素数异常多），可能是扫描误差
+    if cropped_height > h * 1.1 or cropped_width > w * 1.1:
+        print(f"  [保护] 检测到异常拉伸，保持原始分割区域")
+        return pil_img
 
-    # 确保裁剪区域足够大
-    if x_end - x_start < 50 or y_end - y_start < 50:
+    # 设置合理的最小尺寸（避免极小照片）
+    MIN_PHOTO_WIDTH = 150
+    MIN_PHOTO_HEIGHT = 100
+
+    if cropped_height < MIN_PHOTO_HEIGHT or cropped_width < MIN_PHOTO_WIDTH:
         return pil_img
 
     cropped = arr[y_start:y_end + 1, x_start:x_end + 1]
@@ -777,6 +787,17 @@ def detect_by_edge(img: np.ndarray, threshold: float = 0.5, min_size: int = 100,
         aspect = w / max(h, 1)
         if aspect < 0.3 or aspect > 3.5:
             continue
+
+        # 缩小边界框，避免包含扫描纸边缘
+        margin = min(20, w // 10, h // 10)
+        x += margin
+        y += margin
+        w -= 2 * margin
+        h -= 2 * margin
+
+        if w < min_size or h < min_size:
+            continue
+
         boxes.append((x, y, w, h))
 
     # 合并过于靠近的区域（gap 控制）
@@ -867,6 +888,14 @@ def detect_by_color(img: np.ndarray, min_size: int = 100, gap: int = 10):
         if area < area_threshold:
             continue
         x, y, w, h = cv2.boundingRect(cnt)
+        # 缩小边界框，避免包含扫描纸边缘
+        margin = min(20, w // 10, h // 10)
+        x += margin
+        y += margin
+        w -= 2 * margin
+        h -= 2 * margin
+        if w < min_size or h < min_size:
+            continue
         # 排除接近整图的区域
         if w * h > full_area * 0.9:
             continue
@@ -919,6 +948,12 @@ def detect_by_otsu(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
         if area < min_size * min_size:
             continue
         x, y, bw, bh = cv2.boundingRect(cnt)
+        # 缩小边界框，避免包含扫描纸边缘
+        margin = min(20, bw // 10, bh // 10)
+        x += margin
+        y += margin
+        bw -= 2 * margin
+        bh -= 2 * margin
         if bw < min_size or bh < min_size:
             continue
         # 排除接近整图的区域（可能是整个扫描页背景）
@@ -931,6 +966,75 @@ def detect_by_otsu(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
 
         if not is_valid_aspect:
             # 不符合6寸比例，记录但跳过
+            continue
+
+        boxes.append((x, y, bw, bh))
+
+    boxes = merge_close_boxes(boxes, gap)
+
+
+# ─────────────────────────────────────────────
+# 方法四：饱和度通道分割（检测浅色照片内容）
+# ─────────────────────────────────────────────
+def detect_by_saturation(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
+    """
+    使用饱和度通道分割，适合浅色照片内容难以用亮度区分的情况。
+
+    关键改进：
+    1. 使用 HSV 饱和度通道（S > 20）区分彩色照片内容和白色背景
+    2. 严格6寸照片尺寸约束：最小 590x850 或 850x590 像素
+    3. 结合亮度和饱和度信息提高分割精度
+    """
+    # 转换为 HSV 色彩空间
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1]  # 饱和度通道
+    v = hsv[:, :, 2]  # 亮度通道
+
+    # 方法1: 饱和度阈值分割（主要）- 区分彩色内容和白色背景
+    mask_sat = (s > 20).astype(np.uint8) * 255
+
+    # 方法2: 亮度辅助分割 - 去除过亮区域（白色背景）
+    mask_bright = (v < 240).astype(np.uint8) * 255
+
+    # 组合：饱和度 > 20 AND 亮度 < 240
+    mask = cv2.bitwise_and(mask_sat, mask_bright)
+
+    # 形态学操作：先开运算去除噪声，再闭运算连接断裂区域
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=2)
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+
+    contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    boxes = []
+    full_area = img.shape[1] * img.shape[0]
+
+    # 6寸照片尺寸约束（严格）
+    # 6寸照片标准：102mm x 152mm (4x6英寸)
+    # 在约160 DPI扫描下约为 655x945 或 945x655 像素
+    # 允许 ±10% 误差：最小 590x850 或 850x590
+    MIN_PHOTO_WIDTH = 590
+    MIN_PHOTO_HEIGHT = 850
+    MIN_PHOTO_AREA = MIN_PHOTO_WIDTH * MIN_PHOTO_HEIGHT
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < MIN_PHOTO_AREA:
+            continue
+        x, y, bw, bh = cv2.boundingRect(cnt)
+
+        # 严格尺寸约束：两条边都必须满足最小尺寸
+        if bw < MIN_PHOTO_WIDTH or bh < MIN_PHOTO_HEIGHT:
+            continue
+
+        # 排除接近整图的区域（可能是整个扫描页背景）
+        if bw * bh > full_area * 0.90:
+            continue
+
+        # 宽高比约束：0.5-2.0（允许竖版和横版）
+        aspect = bw / max(bh, 1)
+        if aspect < 0.5 or aspect > 2.0:
             continue
 
         boxes.append((x, y, bw, bh))
@@ -959,6 +1063,60 @@ def detect_by_otsu(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
 
     # 按行排序（每行约 700px 高，左右并排的照片在同一行）
     boxes.sort(key=lambda b: (b[1] // 700 * 700, b[0]))
+    return boxes
+
+
+# ─────────────────────────────────────────────
+# 方法：方差分析
+# ─────────────────────────────────────────────
+def detect_by_variance(img: np.ndarray, min_size: int = 100, gap: int = 10) -> list:
+    """
+    通过局部方差分析检测照片边界。
+    照片区域的局部方差通常高于背景扫描纸。
+    返回 sorted boxes: [(x, y, w, h), ...]
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # 计算局部方差
+    kernel = (15, 15)  # 15x15 局部窗口
+    variance = cv2.filter2D(gray, -1, np.ones(kernel)/np.sum(np.ones(kernel)), borderType=cv2.BORDER_REFLECT)
+
+    # 自适应阈值：高方差区域作为照片内容
+    _, mask = cv2.threshold(variance.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 形态学操作
+    kernel = cv2.getStructureElement(cv2.MORPH_RECT, (5, 5))
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    boxes = []
+    full_area = img.shape[1] * img.shape[0]
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_size * min_size:
+            continue
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        # 缩小边界框，避免包含扫描纸边缘
+        margin = min(20, bw // 10, bh // 10)
+        x += margin
+        y += margin
+        bw -= 2 * margin
+        bh -= 2 * margin
+        if bw < min_size or bh < min_size:
+            continue
+        # 排除接近整图的区域
+        if bw * bh > full_area * 0.9:
+            continue
+        aspect = bw / max(bh, 1)
+        if aspect < 0.2 or aspect > 5.0:
+            continue
+        boxes.append((x, y, bw, bh))
+
+    boxes = merge_close_boxes(boxes, gap)
+    boxes.sort(key=lambda b: b[2] * b[3], reverse=True)
     return boxes
 
 
@@ -1069,12 +1227,19 @@ def detect_adaptive(img: np.ndarray, threshold: float, min_size: int, gap: int):
         candidates.append(("edge", s, b))
         print(f"  Edge: {len(edge_boxes)} raw -> {len(b)} valid (score={s:.1f})")
 
-    # Color（适合颜色对比明显的场景）
+    # Color/Saturation（适合颜色对比明显的场景）
     color_boxes = detect_by_color(img, min_size, gap)
     if color_boxes:
         s, b = score_boxes("color", color_boxes)
         candidates.append(("color", s, b))
         print(f"  Color: {len(color_boxes)} raw -> {len(b)} valid (score={s:.1f})")
+
+    # Saturation（适合浅色照片内容）
+    sat_boxes = detect_by_saturation(img, min_size, gap)
+    if sat_boxes:
+        s, b = score_boxes("saturation", sat_boxes)
+        candidates.append(("saturation", s, b))
+        print(f"  Saturation: {len(sat_boxes)} raw -> {len(b)} valid (score={s:.1f})")
 
     if not candidates:
         return []

@@ -67,7 +67,7 @@ python {baseDir}/scripts/auto_split.py <输入图片路径> --method adaptive
 | `--method` | 分割方法：`edge`（边缘检测，默认）/ `color`（颜色聚类）/ `otsu`（自适应阈值，适合无白边紧密排列）/ `adaptive`（自动选择） | `edge` |
 | `--min-size` | 最小照片尺寸（宽和高均须 ≥ 此值） | 100 像素 |
 | `--threshold` | 边缘检测灵敏度（越低越敏感） | 0.5 |
-| `--gap` | 两张照片之间的最小间隔（像素），防止粘连照片被误分 | 10 |
+| `--gap` | 两张照片之间的最小间隔（像素），用于合并粘连区域 | 10 |
 | `--suffix` | 输出文件名后缀前缀 | `photo_` |
 
 ## 工作原理
