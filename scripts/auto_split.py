@@ -495,7 +495,7 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     """裁剪照片周围的白边。
 
     只裁剪边缘的纯白区域，保留内容区域。
-    使用四角检测和6寸照片标准尺寸保护，避免误裁照片中的浅色内容。
+    使用对角线白边检测和最小尺寸保护，避免误裁照片中的浅色内容。
     """
     arr = np.array(pil_img)
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
@@ -510,17 +510,36 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     col_variance = np.var(gray, axis=0)
 
     # ═══════════════════════════════════════════
-    # 关键改进：6寸照片标准尺寸保护
-    # 6寸照片标准尺寸：102mm x 152mm (4x6英寸)
-    # 在300 DPI扫描下约为 1200 x 1800 像素
-    # 最小尺寸保护：宽度 >= 800px，高度 >= 1000px
+    # 关键改进：使用对角线白边检测来判断是否是真正的白边照片
+    # 如果对角线白边差异小（如 photo_008），说明白边分布均匀，可能是扫描纸边缘
+    # 如果对角线白边差异大（如正常照片），说明有方向性，可能是倒置
     # ═══════════════════════════════════════════
-    MIN_PHOTO_WIDTH = 800  # 最小宽度（像素）
-    MIN_PHOTO_HEIGHT = 1000  # 最小高度（像素）
+    corner_size = min(50, w // 10, h // 10)
+    tl = np.mean(gray[:corner_size, :corner_size] > threshold)
+    tr = np.mean(gray[:corner_size, -corner_size:] > threshold)
+    bl = np.mean(gray[-corner_size:, :corner_size] > threshold)
+    br = np.mean(gray[-corner_size:, -corner_size:] > threshold)
 
-    # 找到主要内容区域（白边比例 < 10%）
-    content_rows = np.where(row_white_ratio < 0.1)[0]
-    content_cols = np.where(col_white_ratio < 0.1)[0]
+    diag_diff = max(abs(tl - br), abs(tr - bl))
+    avg_corner_white = (tl + tr + bl + br) / 4
+
+    print(f"  [裁剪] 四角白边: 左上={tl:.0%}, 右上={tr:.0%}, 左下={bl:.0%}, 右下={br:.0%}")
+    print(f"  [裁剪] 对角线差异={diag_diff:.2f}, 平均={avg_corner_white:.0%}")
+
+    # 如果四角平均白边比例很高（>50%），说明是扫描纸边缘，不要裁剪
+    if avg_corner_white > 0.5:
+        print(f"  [裁剪] 检测到扫描纸边缘，不裁剪")
+        return pil_img
+
+    # ═══════════════════════════════════════════
+    # 6寸照片标准尺寸保护
+    # ═══════════════════════════════════════════
+    MIN_PHOTO_WIDTH = 800
+    MIN_PHOTO_HEIGHT = 1000
+
+    # 找到主要内容区域（白边比例 < 5%）
+    content_rows = np.where(row_white_ratio < 0.05)[0]
+    content_cols = np.where(col_white_ratio < 0.05)[0]
 
     if len(content_rows) == 0 or len(content_cols) == 0:
         return pil_img
@@ -529,66 +548,47 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     x_start = content_cols[0]
 
     # ═══════════════════════════════════════════
-    # 非常保守的裁剪策略：只裁剪明显纯白边
+    # 非常保守的裁剪策略：只裁剪明显纯白边（< 5%）
     # ═══════════════════════════════════════════
     y_end_candidates = []
     x_end_candidates = []
 
-    # 方法1: 极宽松阈值（10%）- 只裁剪明显白边
-    very_loose_rows = np.where(row_white_ratio < 0.1)[0]
-    if len(very_loose_rows) > 0:
-        y_end_candidates.append(very_loose_rows[-1])
+    # 方法1: 极严格阈值（5%）
+    strict_rows = np.where(row_white_ratio < 0.05)[0]
+    if len(strict_rows) > 0:
+        y_end_candidates.append(strict_rows[-1])
 
-    # 方法2: 宽松阈值（20%）
-    loose_rows = np.where(row_white_ratio < 0.2)[0]
-    if len(loose_rows) > 0:
-        y_end_candidates.append(loose_rows[-1])
-
-    # 方法3: 基于方差检测（方差骤降点）
+    # 方法2: 基于方差检测（方差骤降点）
     for i in range(h - 30, h):
-        if row_variance[i] < 100 and i > 0 and row_variance[max(0, i-15)] > 300:
+        if row_variance[i] < 50 and i > 0 and row_variance[max(0, i-15)] > 200:
             y_end_candidates.append(i - 15)
             break
 
-    # 选择最保守的裁剪点
     y_end = max(y_end_candidates) if y_end_candidates else content_rows[-1]
 
     # 列方向同样处理
-    very_loose_cols = np.where(col_white_ratio < 0.1)[0]
-    if len(very_loose_cols) > 0:
-        x_end_candidates.append(very_loose_cols[-1])
-
-    loose_cols = np.where(col_white_ratio < 0.2)[0]
-    if len(loose_cols) > 0:
-        x_end_candidates.append(loose_cols[-1])
+    strict_cols = np.where(col_white_ratio < 0.05)[0]
+    if len(strict_cols) > 0:
+        x_end_candidates.append(strict_cols[-1])
 
     for i in range(w - 30, w):
-        if col_variance[i] < 100 and i > 0 and col_variance[max(0, i-15)] > 300:
+        if col_variance[i] < 50 and i > 0 and col_variance[max(0, i-15)] > 200:
             x_end_candidates.append(i - 15)
             break
 
     x_end = max(x_end_candidates) if x_end_candidates else content_cols[-1]
 
     # ═══════════════════════════════════════════
-    # 6寸照片尺寸保护：确保裁剪后不小于标准尺寸
+    # 6寸照片尺寸保护
     # ═══════════════════════════════════════════
     cropped_height = y_end - y_start + 1
     cropped_width = x_end - x_start + 1
 
-    # 如果裁剪后小于最小尺寸，放宽裁剪阈值
     if cropped_height < MIN_PHOTO_HEIGHT or cropped_width < MIN_PHOTO_WIDTH:
-        print(f"  [保护] 裁剪后尺寸 {cropped_width}x{cropped_height} 小于标准，放宽阈值")
-        # 使用更宽松的阈值重新计算
-        very_loose_rows = np.where(row_white_ratio < 0.5)[0]
-        if len(very_loose_rows) > 0:
-            y_end = max(y_end, very_loose_rows[-1])
-        very_loose_cols = np.where(col_white_ratio < 0.5)[0]
-        if len(very_loose_cols) > 0:
-            x_end = max(x_end, very_loose_cols[-1])
-        cropped_height = y_end - y_start + 1
-        cropped_width = x_end - x_start + 1
+        print(f"  [保护] 裁剪后尺寸 {cropped_width}x{cropped_height} 小于标准，不裁剪")
+        return pil_img
 
-    # 确保至少保留 99% 的内容（非常保守）
+    # 确保至少保留 99% 的内容
     min_height = max(MIN_PHOTO_HEIGHT, int(h * 0.99))
     min_width = max(MIN_PHOTO_WIDTH, int(w * 0.99))
     if cropped_height < min_height:
@@ -596,11 +596,10 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     if cropped_width < min_width:
         x_end = x_start + min_width - 1
 
-    # 确保裁剪区域足够大（至少50x50）
+    # 确保裁剪区域足够大
     if x_end - x_start < 50 or y_end - y_start < 50:
         return pil_img
 
-    # 裁剪
     cropped = arr[y_start:y_end + 1, x_start:x_end + 1]
     return Image.fromarray(cropped)
 
