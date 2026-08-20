@@ -491,7 +491,7 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     return pil_img
 
 
-def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Image:
+def _crop_white_borders(pil_img: Image.Image, threshold: int = 250) -> Image.Image:
     """裁剪照片周围的白边。
 
     只裁剪边缘的纯白区域，保留内容区域。
@@ -526,8 +526,8 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     print(f"  [裁剪] 四角白边: 左上={tl:.0%}, 右上={tr:.0%}, 左下={bl:.0%}, 右下={br:.0%}")
     print(f"  [裁剪] 对角线差异={diag_diff:.2f}, 平均={avg_corner_white:.0%}")
 
-    # 如果四角平均白边比例很高（>65%），说明是扫描纸边缘，不要裁剪
-    if avg_corner_white > 0.65:
+    # 如果四角平均白边比例很高（>75%），说明是扫描纸边缘，不要裁剪
+    if avg_corner_white > 0.75:
         print(f"  [裁剪] 检测到扫描纸边缘，不裁剪")
         return pil_img
 
@@ -537,9 +537,9 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     MIN_PHOTO_WIDTH = 800
     MIN_PHOTO_HEIGHT = 1000
 
-    # 找到主要内容区域（白边比例 < 15%）
-    content_rows = np.where(row_white_ratio < 0.15)[0]
-    content_cols = np.where(col_white_ratio < 0.15)[0]
+    # 找到主要内容区域（白边比例 < 10%） - 更严格的阈值
+    content_rows = np.where(row_white_ratio < 0.10)[0]
+    content_cols = np.where(col_white_ratio < 0.10)[0]
 
     if len(content_rows) == 0 or len(content_cols) == 0:
         return pil_img
@@ -553,8 +553,8 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
     y_end_candidates = []
     x_end_candidates = []
 
-    # 方法1: 宽松阈值（15%）
-    strict_rows = np.where(row_white_ratio < 0.15)[0]
+    # 方法1: 宽松阈值（20%） - 更保守
+    strict_rows = np.where(row_white_ratio < 0.20)[0]
     if len(strict_rows) > 0:
         y_end_candidates.append(strict_rows[-1])
 
@@ -581,8 +581,8 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 230) -> Image.Ima
             break
 
     # 列方向同样处理
-    # 方法1: 宽松阈值（15%）
-    strict_cols = np.where(col_white_ratio < 0.15)[0]
+    # 方法1: 宽松阈值（20%） - 更保守
+    strict_cols = np.where(col_white_ratio < 0.20)[0]
     if len(strict_cols) > 0:
         x_end_candidates.append(strict_cols[-1])
 
