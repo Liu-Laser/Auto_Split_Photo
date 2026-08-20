@@ -83,6 +83,26 @@ def parse_args():
         action="store_true",
         help="Recursively process all image files in subdirectories",
     )
+    parser.add_argument(
+        "--no-rotate",
+        action="store_true",
+        help="跳过方向校正（保持原始方向）",
+    )
+    parser.add_argument(
+        "--conservative-rotation",
+        action="store_true",
+        help="保守旋转模式：只有高置信度时才旋转",
+    )
+    parser.add_argument(
+        "--aspect-detection",
+        choices=["auto", "landscape", "portrait"],
+        help="强制指定照片长宽比模式",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="显示详细信息输出",
+    )
     return parser.parse_args()
 
 
@@ -283,37 +303,193 @@ def _fix_orientation(pil_img: Image.Image) -> Image.Image:
     text_signal = -text_skew  # > 0 = 更多文字在底部 = 可能倒置
 
     # 综合决策
-    # 关键规律：
-    #   - sat_skew < -0.05（底部饱和度明显更低）= 天花板朝下 → 强烈倒置信号
-    #   - bright_skew < -0.05（底部明显更亮）= 可能是天花板朝下
-    #   - text_skew 负 + 高文本密度 = 文字结构在底部，可能倒置
+    # 修正逻辑：根据用户反馈，判断标准需要反转
+    # 实际上：底部更亮/饱和度更高 = 正常方向
+    #         顶部更亮/饱和度更高 = 倒置
     is_upside_down = False
 
     # 综合评分（用于条件4判断）
     confidence = sat_signal * 0.5 + bright_signal * 0.3 + text_signal * 0.2
 
-    # 条件1: 强饱和度倒置信号
-    if sat_signal > 0.05:
+    # 条件1: 顶部饱和度明显更高（倒置信号）
+    if sat_signal < -0.05:  # 顶部饱和度明显高于底部
         is_upside_down = True
 
-    # 条件2: 高文本密度 + 中等饱和度信号（会议/室内照片）
-    elif total_text >= 5 and sat_signal > 0.02:
+    # 条件2: 顶部亮度明显更高（倒置信号）
+    elif bright_signal < -0.05:  # 顶部明显更亮
         is_upside_down = True
 
-    # 条件3: 强文本信号
-    elif total_text >= 3 and text_signal > 0.3:
+    # 条件3: 高文本密度在顶部（倒置信号）
+    elif total_text >= 5 and sat_signal < -0.02:
         is_upside_down = True
 
-    # 条件4: 综合评分足够高
-    elif confidence > 0.2:
+    # 条件4: 强文本信号（文字集中在顶部）
+    elif total_text >= 3 and text_signal < -0.3:
         is_upside_down = True
+
+    # 条件5: 综合评分足够低（表示顶部特征明显）
+    elif confidence < -0.2:
+        is_upside_down = True
+
+    # 显示方向检测信息
+    print(f"    [方向检测] 饱和度偏斜: {sat_skew:.3f} (顶部={top_s:.1f}, 底部={bot_s:.1f})")
+    print(f"    [方向检测] 亮度偏斜: {bright_skew:.3f} (顶部={top_b:.1f}, 底部={bot_b:.1f})")
+    print(f"    [方向检测] 文字分布: 上={top_lines} 下={bot_lines}")
+    print(f"    [方向检测] 综合置信度: {confidence:.3f}")
 
     if is_upside_down:
+        print(f"    [方向检测] 检测到倒置 → 自动旋转180度")
         return pil_img.rotate(180, expand=False)
+    else:
+        print(f"    [方向检测] 方向正常 → 无需旋转")
+        return pil_img
+
+
+def enhanced_orientation_detection(pil_img: Image.Image, args) -> Image.Image:
+    """
+    增强的方向检测函数，同时处理长宽比和方向
+    返回修正后的图片
+    """
+    arr = np.array(pil_img)
+    h, w = arr.shape[:2]
+    aspect_ratio = w / h
+
+    # 基本长宽比判断
+    is_landscape = aspect_ratio >= 1
+
+    # 如果强制指定了长宽比模式
+    if args.aspect_detection == "landscape" and not is_landscape:
+        # 强制转为横版
+        print(f"    [长宽比检测] 强制转换为横版 (原始 {w}x{h} = {aspect_ratio:.2f})")
+        pil_img = pil_img.rotate(90, expand=True)
+        # 更新尺寸
+        h, w = pil_img.size
+        aspect_ratio = w / h
+        print(f"    [长宽比检测] 旋转后 {w}x{h} = {aspect_ratio:.2f}")
+        is_landscape = True
+    elif args.aspect_detection == "portrait" and is_landscape:
+        # 强制转为竖版
+        print(f"    [长宽比检测] 强制转换为竖版 (原始 {w}x{h} = {aspect_ratio:.2f})")
+        pil_img = pil_img.rotate(90, expand=True)
+        h, w = pil_img.size
+        aspect_ratio = w / h
+        print(f"    [长宽比检测] 旋转后 {w}x{h} = {aspect_ratio:.2f}")
+        is_landscape = False
+    else:
+        print(f"    [长宽比检测] 保持原始 {w}x{h} = {aspect_ratio:.2f} ({'横版' if is_landscape else '竖版'})")
+
+    # 分析照片内容方向
+    if not args.no_rotate:
+        # 转换为BGR格式
+        if len(arr.shape) == 3:
+            img_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = arr
+
+        # 分析边缘密度
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        sobel_h = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        sobel_v = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+
+        h_energy = np.mean(np.abs(sobel_h))
+        v_energy = np.mean(np.abs(sobel_v))
+        edge_ratio = h_energy / (v_energy + 1e-5)
+
+        # 分析人脸分布
+        face_score = 0
+        try:
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30))
+            if len(faces) > 0:
+                # 统计人脸在上下半部分的分布
+                top_faces = sum(1 for x_f, y_f, fw, fh in faces if y_f + fh < h // 2)
+                bot_faces = len(faces) - top_faces
+                if bot_faces > top_faces:
+                    face_score = 0.5  # 人脸在底部
+                else:
+                    face_score = -0.5  # 人脸在顶部
+        except:
+            pass
+
+        # 判断是否需要旋转为横版
+        # 条件：1. 水平边缘明显多于垂直边缘 2. 人脸分布正常
+        should_rotate_to_landscape = (edge_ratio > 1.3 and face_score >= 0) or \
+                                   (edge_ratio > 1.5 and face_score > -0.5)
+
+        if should_rotate_to_landscape and not is_landscape:
+            print(f"    [内容检测] 检测到横版内容 (边缘比: {edge_ratio:.2f}, 人脸分布: {face_score:.2f})")
+            pil_img = pil_img.rotate(90, expand=True)
+            h, w = pil_img.size
+            print(f"    [内容检测] 旋转为横版 {w}x{h}")
+            is_landscape = True
+        elif should_rotate_to_landscape and is_landscape:
+            print(f"    [内容检测] 已是横版内容 (边缘比: {edge_ratio:.2f})")
+        else:
+            print(f"    [内容检测] 保持当前方向 (边缘比: {edge_ratio:.2f}, 人脸分布: {face_score:.2f})")
+
+        if args.verbose:
+            print(f"    [详细分析] 水平边缘能量: {h_energy:.2f}")
+            print(f"    [详细分析] 垂直边缘能量: {v_energy:.2f}")
+            print(f"    [详细分析] 边缘密度比: {edge_ratio:.2f}")
+            print(f"    [详细分析] 人脸分布分数: {face_score:.2f}")
+
+    # 如果是保守模式，只对竖版照片进行倒置检测
+    orientation = "normal"
+    confidence = 0.0
+    detailed_info = {}
+
+    if not is_landscape:  # 只有竖版照片才需要检测倒置
+        # 计算倒置检测的特征
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+
+        # 1. 饱和度偏斜检测（权重 50%）
+        top_sat = np.mean(hsv[:h//2, :, 1])
+        bot_sat = np.mean(hsv[h//2:, :, 1])
+        sat_skew = (top_sat - bot_sat) / (top_sat + bot_sat + 1e-5)
+        detailed_info['sat_skew'] = sat_skew
+
+        # 2. 亮度偏斜检测（权重 30%）
+        top_brightness = np.mean(gray[:h//2])
+        bot_brightness = np.mean(gray[h//2:])
+        bright_skew = (top_brightness - bot_brightness) / (top_brightness + bot_brightness + 1e-5)
+        detailed_info['bright_skew'] = bright_skew
+
+        # 3. 文字结构检测（权重 20%）
+        sobel_h = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        top_lines = np.sum(np.abs(sobel_h[:h//3]))
+        bot_lines = np.sum(np.abs(sobel_h[2*h//3:]))
+        text_structure = 0
+        if top_lines + bot_lines > 0:
+            text_structure = (bot_lines - top_lines) / (top_lines + bot_lines)
+        detailed_info['text_structure'] = text_structure
+
+        # 计算综合置信度
+        confidence = (sat_skew * 0.5 + bright_skew * 0.3 + text_structure * 0.2)
+
+        # 判断是否倒置
+        if confidence < -0.2 and not args.conservative_rotation:
+            orientation = "inverted"
+            print(f"    [倒置检测] 检测到倒置 (置信度: {confidence:.3f})")
+        else:
+            print(f"    [倒置检测] 方向正常 (置信度: {confidence:.3f})")
+    else:
+        # 横版照片不需要倒置检测
+        confidence = 1.0
+        detailed_info['note'] = '横版照片，跳过倒置检测'
+
+    if args.verbose and len(detailed_info) > 1:
+        print(f"    [详细分析] 饱和度偏斜: {detailed_info.get('sat_skew', 0):.3f}")
+        print(f"    [详细分析] 亮度偏斜: {detailed_info.get('bright_skew', 0):.3f}")
+        print(f"    [详细分析] 文字结构: {detailed_info.get('text_structure', 0):.3f}")
+
+    # 如果是倒置且不是保守模式，旋转照片
+    if orientation == "inverted" and not args.conservative_rotation:
+        pil_img = pil_img.rotate(180, expand=False)
+
     return pil_img
 
 
-def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
+def _check_white_border_rotation(pil_img: Image.Image, args) -> Image.Image:
     """综合多特征判断照片是否倒置并修正。
 
     融合以下特征（按置信度加权）：
@@ -397,10 +573,10 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
     # 特征3：四角白边分布分析（权重 20%）
     # ═══════════════════════════════════════════
     corner_size = min(150, w // 5, h // 5)
-    tl = np.mean(gray[:corner_size, :corner_size] > 230)
-    tr = np.mean(gray[:corner_size, -corner_size:] > 230)
-    bl = np.mean(gray[-corner_size:, :corner_size] > 230)
-    br = np.mean(gray[-corner_size:, -corner_size:] > 230)
+    tl = np.mean(gray[:corner_size, :corner_size] > 250)
+    tr = np.mean(gray[:corner_size, -corner_size:] > 250)
+    bl = np.mean(gray[-corner_size:, :corner_size] > 250)
+    br = np.mean(gray[-corner_size:, -corner_size:] > 250)
 
     diag_diff = max(abs(tl - br), abs(tr - bl))
     side_diff = max(abs((tl + tr) / 2 - (bl + br) / 2),
@@ -464,34 +640,50 @@ def _check_white_border_rotation(pil_img: Image.Image) -> Image.Image:
                    feature4_score +
                    feature5_score)
 
-    # 决策逻辑：
-    # 1. 如果人脸检测高置信度（>0.6），优先按人脸判断
-    # 2. 否则按综合评分判断
+    # 显示检测结果
+    print(f"    [白边检测] 人脸评分: {face_score:.3f} (检测到{faces.shape[0] if faces is not None else 0}张人脸)")
+    print(f"    [白边检测] 亮度差: {bright_diff:.1f} (上={top_bright:.1f}, 下={bot_bright:.1f})")
+    print(f"    [白边检测] 饱和度差: {sat_diff:.1f} (上={top_sat:.1f}, 下={bot_sat:.1f})")
+    print(f"    [白边检测] 四角白边: 左上={tl:.2f} 右上={tr:.2f} 左下={bl:.2f} 右下={br:.2f}")
+    print(f"    [白边检测] 文字分布: 上={top_lines} 下={bot_lines}")
+    print(f"    [白边检测] 综合评分: {total_score:.3f}")
 
-    if face_score >= 0.6:
-        # 人脸检测高置信度，直接旋转
-        rotated = cv2.rotate(arr, cv2.ROTATE_180)
-        return _crop_white_borders(Image.fromarray(rotated))
-    elif face_score <= 0.2 and faces is not None and len(faces) >= 2:
-        # 人脸检测低置信度（正常），不旋转
+    # 决策逻辑：
+    # 修正逻辑：根据用户反馈，判断标准需要反转
+    # 人脸在顶部 = 正常，人脸在底部 = 倒置
+    # 顶部更亮/饱和度更高 = 倒置
+    if face_score >= 0.2 and faces is not None and len(faces) >= 2:
+        # 人脸集中在顶部（正常分布）
+        print(f"    [白边检测] 人脸正常分布 → 无需旋转")
         pass
-    elif abs(bright_diff) > 80:  # 提高阈值，避免误判
-        # 亮度差特别大，直接旋转
+    elif face_score <= 0.1 and faces is not None and len(faces) >= 2:
+        # 人脸集中在底部（倒置）
+        print(f"    [白边检测] 人脸集中在底部 → 旋转180度")
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.45:
-        # 综合评分高，旋转
+    elif bright_diff > 80:  # 顶部明显更亮
+        print(f"    [白边检测] 顶部明显更亮 → 旋转180度")
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
-    elif total_score > 0.3 and diag_diff > 0.5:  # 提高白边差异阈值
-        # 中等置信度 + 白边差异，旋转
+    elif sat_diff > 50:  # 顶部饱和度明显更高
+        print(f"    [白边检测] 顶部饱和度明显更高 → 旋转180度")
         rotated = cv2.rotate(arr, cv2.ROTATE_180)
         return _crop_white_borders(Image.fromarray(rotated))
+    elif total_score < 0.2:  # 综合评分很低（顶部特征明显）
+        print(f"    [白边检测] 综合评分低 → 旋转180度")
+        rotated = cv2.rotate(arr, cv2.ROTATE_180)
+        return _crop_white_borders(Image.fromarray(rotated))
+    elif diag_diff > 0.5 and side_diff < 0.3:  # 对角线差异大且单侧差异小
+        print(f"    [白边检测] 对角线白边差异大 → 旋转180度")
+        rotated = cv2.rotate(arr, cv2.ROTATE_180)
+        return _crop_white_borders(Image.fromarray(rotated))
+    else:
+        print(f"    [白边检测] 方向正常 → 无需旋转")
 
     return pil_img
 
 
-def _crop_white_borders(pil_img: Image.Image, threshold: int = 250) -> Image.Image:
+def _crop_white_borders(pil_img: Image.Image, threshold: int = 260) -> Image.Image:
     """裁剪照片周围的白边。
 
     只裁剪边缘的纯白区域，保留内容区域。
@@ -537,9 +729,9 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 250) -> Image.Ima
     MIN_PHOTO_WIDTH = 800
     MIN_PHOTO_HEIGHT = 1000
 
-    # 找到主要内容区域（白边比例 < 10%） - 更严格的阈值
-    content_rows = np.where(row_white_ratio < 0.10)[0]
-    content_cols = np.where(col_white_ratio < 0.10)[0]
+    # 找到主要内容区域（白边比例 < 25%） - 更保守
+    content_rows = np.where(row_white_ratio < 0.25)[0]
+    content_cols = np.where(col_white_ratio < 0.25)[0]
 
     if len(content_rows) == 0 or len(content_cols) == 0:
         return pil_img
@@ -553,8 +745,8 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 250) -> Image.Ima
     y_end_candidates = []
     x_end_candidates = []
 
-    # 方法1: 宽松阈值（20%） - 更保守
-    strict_rows = np.where(row_white_ratio < 0.20)[0]
+    # 方法1: 宽松阈值（35%） - 更保守
+    strict_rows = np.where(row_white_ratio < 0.35)[0]
     if len(strict_rows) > 0:
         y_end_candidates.append(strict_rows[-1])
 
@@ -581,8 +773,8 @@ def _crop_white_borders(pil_img: Image.Image, threshold: int = 250) -> Image.Ima
             break
 
     # 列方向同样处理
-    # 方法1: 宽松阈值（20%） - 更保守
-    strict_cols = np.where(col_white_ratio < 0.20)[0]
+    # 方法1: 宽松阈值（35%） - 更保守
+    strict_cols = np.where(col_white_ratio < 0.35)[0]
     if len(strict_cols) > 0:
         x_end_candidates.append(strict_cols[-1])
 
@@ -721,7 +913,7 @@ def _enhance_image(pil_img: Image.Image, strength: float = 0.3) -> Image.Image:
     return Image.fromarray(result)
 
 
-def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1, enhance: bool = True):
+def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, start_index: int = 1, enhance: bool = True, no_rotate: bool = False, args=None):
     """将检测到的边界框裁剪并保存到输出目录。
     使用 PIL 保存以支持中文路径，并自动修正倒置照片和旋转角度。
     start_index: 起始编号（用于批量顺序编号）
@@ -736,10 +928,10 @@ def save_images(boxes: list, img: np.ndarray, output_dir: Path, suffix: str, sta
         pil_img = Image.fromarray(rgb_crop)
         # 自动矫正旋转角度
         pil_img = _correct_rotation(pil_img)
-        # 自动修正方向
-        pil_img = _fix_orientation(pil_img)
-        # 检测白边分布并修正倾斜
-        pil_img = _check_white_border_rotation(pil_img)
+        # 自动修正方向（如果不禁用）
+        if not no_rotate:
+            # 使用增强的方向检测
+            pil_img = enhanced_orientation_detection(pil_img, args)
         # 裁剪白边
         pil_img = _crop_white_borders(pil_img)
         # 倾斜矫正
@@ -1218,7 +1410,7 @@ def process_one(img_path: Path, args, global_index: int, flat_output: bool = Fal
     for i, (x, y, bw, bh) in enumerate(boxes, start=1):
         print(f"    [{i:03d}] pos({x},{y}) size {bw}x{bh}")
 
-    saved = save_images(boxes, img, output_dir, args.suffix, global_index)
+    saved = save_images(boxes, img, output_dir, args.suffix, global_index, enhance=True, no_rotate=args.no_rotate, args=args)
     return saved, global_index + len(boxes)
 
 
