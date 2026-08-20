@@ -29,7 +29,7 @@ metadata:
 ## 使用方式
 
 ```bash
-# 单张图片
+# 单张图片（现在默认使用自适应方法，推荐）
 python {baseDir}/scripts/auto_split.py <输入图片路径>
 
 # 整个目录批量处理（自动扫描所有图片文件）
@@ -44,8 +44,8 @@ python {baseDir}/scripts/auto_split.py <图片目录路径> -o ./结果
 # 最小分割尺寸
 python {baseDir}/scripts/auto_split.py <输入图片路径> --min-size 200
 
-# 调整边缘检测灵敏度
-python {baseDir}/scripts/auto_split.py <输入图片路径> --threshold 0.3
+# 调整边缘检测灵敏度（默认已降低到0.3，更敏感）
+python {baseDir}/scripts/auto_split.py <输入图片路径> --threshold 0.2
 
 # 按颜色聚类分割（适合背景色统一的扫描件）
 python {baseDir}/scripts/auto_split.py <输入图片路径> --method color
@@ -53,8 +53,8 @@ python {baseDir}/scripts/auto_split.py <输入图片路径> --method color
 # Otsu 自适应阈值（适合照片无白边、直接贴在卡纸上的扫描件）
 python {baseDir}/scripts/auto_split.py <输入图片路径> --method otsu
 
-# 自动选择最优方法（推荐，默认）
-python {baseDir}/scripts/auto_split.py <输入图片路径> --method adaptive
+# 强制使用边缘检测（不推荐，除非特殊需求）
+python {baseDir}/scripts/auto_split.py <输入图片路径> --method edge
 ```
 
 ## 参数说明
@@ -64,9 +64,9 @@ python {baseDir}/scripts/auto_split.py <输入图片路径> --method adaptive
 | `<input>` | 输入扫描图片路径 **或目录路径**（支持 JPG/PNG/BMP/TIFF） | 必填 |
 | `-o, --output` | 输出目录 | 与输入文件同目录下的 `split_output/` |
 | `-r, --recursive` | 递归处理子目录中的所有图片 | 关闭 |
-| `--method` | 分割方法：`edge`（边缘检测，默认）/ `color`（颜色聚类）/ `otsu`（自适应阈值，适合无白边紧密排列）/ `adaptive`（自动选择） | `edge` |
+| `--method` | 分割方法：`edge`（边缘检测）/ `color`（颜色聚类）/ `otsu`（自适应阈值，适合无白边紧密排列）/ `adaptive`（自动选择，推荐） | `adaptive` |
 | `--min-size` | 最小照片尺寸（宽和高均须 ≥ 此值） | 100 像素 |
-| `--threshold` | 边缘检测灵敏度（越低越敏感） | 0.5 |
+| `--threshold` | 边缘检测灵敏度（越低越敏感） | 0.3 |
 | `--gap` | 两张照片之间的最小间隔（像素），用于合并粘连区域 | 10 |
 | `--suffix` | 输出文件名后缀前缀 | `photo_` |
 
@@ -86,10 +86,11 @@ python {baseDir}/scripts/auto_split.py <输入图片路径> --method adaptive
 3. 分离前景（照片内容）与背景
 4. 提取各连通区域并裁剪
 
-### 方法三：自适应（先 edge 后 color）
-1. 先用边缘检测方法
-2. 如果检测到的照片数量过少（≤1），改用颜色聚类重试
-3. 融合两种方法的检测结果，取并集
+### 方法三：自适应（自动选择最优方法，推荐）
+1. 依次尝试 Otsu、Edge、Color 三种方法
+2. 对每种方法的检测结果进行评分
+3. 选择得分最高的方法的结果
+4. 适合各种类型的扫描件，是最可靠的方法
 
 ## 自动方向校正
 
@@ -175,7 +176,7 @@ python {baseDir}/scripts/install_requirements.py
 
 | 问题 | 解决方案 |
 |------|----------|
-| 检测不到任何照片 | 尝试降低 `--threshold`（如 0.3）或换用 `--method color` |
+| 检测不到任何照片 | 尝试降低 `--threshold`（如 0.2）或换用 `--method color` |
 | 一张照片被切成多块 | 增大 `--gap` 值（如 30），或增大 `--min-size` |
 | 两张照片被合并成一块 | 减小 `--gap` 值（如 5），或降低 `--threshold` |
 | 输出图片质量差 | 输入文件本身分辨率过低；或增加 `--min-size` 过滤小区域 |

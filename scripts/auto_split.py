@@ -51,8 +51,8 @@ def parse_args():
     parser.add_argument(
         "--method",
         choices=["edge", "color", "variance", "otsu", "adaptive"],
-        default="edge",
-        help="分割方法：edge=边缘检测，color=颜色聚类，variance=方差分析，otsu=自适应阈值（适合无白边的紧密排列扫描件），adaptive=自适应融合",
+        default="adaptive",
+        help="分割方法：edge=边缘检测，color=颜色聚类，variance=方差分析，otsu=自适应阈值（适合无白边的紧密排列扫描件），adaptive=自适应融合（推荐）",
     )
     parser.add_argument(
         "--min-size",
@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
+        default=0.3,
         help="边缘检测灵敏度（0~1，越低越敏感；对应 Canny 的 low_threshold 比例）",
     )
     parser.add_argument(
