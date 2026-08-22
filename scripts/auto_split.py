@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="输出目录（默认：与输入文件同目录下的 split_output/）",
+        help="输出目录（默认：在输入文件/所在目录下创建 [输入文件名]_output/ 目录）",
     )
     parser.add_argument(
         "--method",
@@ -1379,7 +1379,16 @@ def process_one(img_path: Path, args, global_index: int, flat_output: bool = Fal
         else:
             output_dir = Path(args.output) / stem
     else:
-        output_dir = img_path.parent / "split_output" / stem
+        # 默认输出目录策略
+        if flat_output:
+            # 批量处理目录时：在输入目录下创建 output/ 目录
+            if img_path.parent.name:  # 确保不是根目录
+                output_dir = img_path.parent / "output"
+            else:
+                output_dir = Path("output")
+        else:
+            # 单张文件处理：在文件所在目录创建 [文件名]_output/
+            output_dir = img_path.parent / f"{stem}_output"
 
     print(f"\n[{global_index:03d}] {img_path.name}")
     print(f"  Size: {w}x{h}")
@@ -1433,8 +1442,14 @@ def main():
 
     all_saved: list[Path] = []
     idx = 1
-    # 批量处理时自动使用扁平输出（所有照片输出到同一目录）
-    flat_output = len(images) > 1 and args.output is not None
+    # 批量处理时默认使用扁平输出（所有照片输出到同一目录）
+    flat_output = len(images) > 1
+    # 只有明确指定输出目录且用户想要扁平输出时才强制扁平
+    if args.output and flat_output:
+        flat_output = True
+    elif args.output:
+        # 用户指定了输出目录但只有一个文件，创建子目录
+        flat_output = False
     for img_path in images:
         saved, idx = process_one(img_path, args, idx, flat_output=flat_output)
         all_saved.extend(saved)

@@ -29,10 +29,10 @@ metadata:
 ## 使用方式
 
 ```bash
-# 单张图片（现在默认使用自适应方法，推荐）
+# 单张图片（在图片所在目录创建 [图片名]_output/）
 python {baseDir}/scripts/auto_split.py <输入图片路径>
 
-# 整个目录批量处理（自动扫描所有图片文件）
+# 整个目录批量处理（在输入目录下创建 output/，所有照片保存到同一目录）
 python {baseDir}/scripts/auto_split.py <图片目录路径>
 
 # 递归处理子目录中的图片
@@ -62,7 +62,7 @@ python {baseDir}/scripts/auto_split.py <输入图片路径> --method edge
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `<input>` | 输入扫描图片路径 **或目录路径**（支持 JPG/PNG/BMP/TIFF） | 必填 |
-| `-o, --output` | 输出目录 | 与输入文件同目录下的 `split_output/` |
+| `-o, --output` | 输出目录 | 默认：单张图片创建 [文件名]_output/，目录处理创建 output/ |
 | `-r, --recursive` | 递归处理子目录中的所有图片 | 关闭 |
 | `--method` | 分割方法：`edge`（边缘检测）/ `color`（颜色聚类）/ `otsu`（自适应阈值，适合无白边紧密排列）/ `adaptive`（自动选择，推荐） | `adaptive` |
 | `--min-size` | 最小照片尺寸（宽和高均须 ≥ 此值） | 100 像素 |
